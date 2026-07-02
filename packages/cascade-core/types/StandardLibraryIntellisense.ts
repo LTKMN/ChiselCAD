@@ -391,6 +391,8 @@ function EdgeLength(shape: oc.TopoDS_Shape): number;
 
 /** Creates a labeled slider with specified defaults, min, and max ranges.
  * Returns the current slider value. `name` must be unique.
+ * The model re-evaluates live while the slider is dragged.
+ * @param realTime Deprecated — sliders always update live; kept for compatibility.
  * @param step Keyboard arrow key increment (default: 0.01)
  * @param precision Decimal places shown (default: 2)
  * @example```let radius = Slider("Radius", 30, 20, 40);```

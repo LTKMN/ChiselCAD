@@ -103,6 +103,11 @@ class CascadeEngine {
     return this._messageBus.request('saveShapeSTEP');
   }
 
+  /** Clear the worker's operation cache; the next evaluation recomputes everything. */
+  clearCache() {
+    this._messageBus.send('clearCache');
+  }
+
   /** Send files to the worker for import. */
   importFiles(files) {
     this._messageBus.send('loadFiles', files);

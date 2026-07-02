@@ -144,8 +144,17 @@ class CascadeEnvironment {
       this.mouse.y = - (event.offsetY / this.goldenContainer.height) * 2 + 1;
     }, false);
 
+    // Viewport display settings (app-level, not per-model) — persisted locally
+    this._viewportSettings = { groundPlane: true, grid: true };
+    try {
+      Object.assign(this._viewportSettings, JSON.parse(localStorage.getItem('chisel-viewport') || '{}'));
+    } catch (e) { /* corrupted prefs — fall back to defaults */ }
+
     // Create the timeline overlay DOM
     this._createTimelineOverlay();
+
+    // Create the viewport settings popover (bottom-right corner)
+    this._createViewportSettingsOverlay();
 
     // Initialize the Handle Manager (no messageBus needed — app wires events)
     this.handleManager = new HandleManager(this);
@@ -168,30 +177,7 @@ class CascadeEnvironment {
     // The old mainObject is dead! Long live the mainObject!
     this.environment.scene.remove(this.mainObject);
 
-    this.environment.scene.remove(this.groundMesh);
-    if (sceneOptions.groundPlaneVisible) {
-      this.groundMesh = new THREE.Mesh(
-        new THREE.PlaneGeometry(2000, 2000),
-        new THREE.MeshPhongMaterial({
-          color: 0x080808, depthWrite: true, dithering: true,
-          polygonOffset: true,
-          polygonOffsetFactor: 6.0, polygonOffsetUnits: 1.0
-        })
-      );
-      this.groundMesh.position.y = -0.1;
-      this.groundMesh.rotation.x = -Math.PI / 2;
-      this.groundMesh.receiveShadow = true;
-      this.environment.scene.add(this.groundMesh);
-    }
-
-    this.environment.scene.remove(this.grid);
-    if (sceneOptions.gridVisible) {
-      this.grid = new THREE.GridHelper(2000, 20, 0xcccccc, 0xcccccc);
-      this.grid.position.y = -0.01;
-      this.grid.material.opacity = 0.3;
-      this.grid.material.transparent = true;
-      this.environment.scene.add(this.grid);
-    }
+    this._updateGroundAndGrid(sceneOptions);
 
     this.mainObject = this._buildObjectFromMesh(facelist, edgelist);
 
@@ -388,6 +374,114 @@ class CascadeEnvironment {
   }
 
   /** Create the timeline overlay DOM elements. */
+  /** Scene options derived from viewport settings, sent with each evaluation. */
+  getSceneOptions() {
+    return {
+      groundPlaneVisible: this._viewportSettings.groundPlane,
+      gridVisible: this._viewportSettings.grid,
+    };
+  }
+
+  /** Update a viewport setting, persist it, and apply it to the scene live. */
+  setViewportSetting(key, value) {
+    this._viewportSettings[key] = value;
+    try {
+      localStorage.setItem('chisel-viewport', JSON.stringify(this._viewportSettings));
+    } catch (e) { /* private mode etc. — setting still applies this session */ }
+    this._updateGroundAndGrid(this.getSceneOptions());
+    this._lastSceneOptions = this.getSceneOptions();
+    this.environment.viewDirty = true;
+  }
+
+  /** (Re)create or remove the ground plane and grid to match sceneOptions. */
+  _updateGroundAndGrid(sceneOptions) {
+    this.environment.scene.remove(this.groundMesh);
+    if (sceneOptions.groundPlaneVisible) {
+      this.groundMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(2000, 2000),
+        new THREE.MeshPhongMaterial({
+          color: 0x080808, depthWrite: true, dithering: true,
+          polygonOffset: true,
+          polygonOffsetFactor: 6.0, polygonOffsetUnits: 1.0
+        })
+      );
+      this.groundMesh.position.y = -0.1;
+      this.groundMesh.rotation.x = -Math.PI / 2;
+      this.groundMesh.receiveShadow = true;
+      this.environment.scene.add(this.groundMesh);
+    }
+
+    this.environment.scene.remove(this.grid);
+    if (sceneOptions.gridVisible) {
+      this.grid = new THREE.GridHelper(2000, 20, 0xcccccc, 0xcccccc);
+      this.grid.position.y = -0.01;
+      this.grid.material.opacity = 0.3;
+      this.grid.material.transparent = true;
+      this.environment.scene.add(this.grid);
+    }
+  }
+
+  /** Blender-style viewport settings button + popover in the bottom-right
+   *  corner. New display settings (matcap, SSAO, ...) slot into the defs list. */
+  _createViewportSettingsOverlay() {
+    const settingsDefs = [
+      { key: 'groundPlane', label: 'Ground Plane' },
+      { key: 'grid', label: 'Grid' },
+    ];
+
+    const container = document.createElement('div');
+    container.className = 'cs-vpset';
+    this.goldenContainer.element.appendChild(container);
+
+    const popover = document.createElement('div');
+    popover.className = 'cs-vpset-popover';
+    popover.style.display = 'none';
+
+    const title = document.createElement('div');
+    title.className = 'cs-vpset-title';
+    title.textContent = 'Viewport';
+    popover.appendChild(title);
+
+    for (const def of settingsDefs) {
+      const row = document.createElement('label');
+      row.className = 'cs-vpset-row';
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = !!this._viewportSettings[def.key];
+      checkbox.addEventListener('change', () => {
+        this.setViewportSetting(def.key, checkbox.checked);
+      });
+
+      const text = document.createElement('span');
+      text.textContent = def.label;
+
+      row.appendChild(checkbox);
+      row.appendChild(text);
+      popover.appendChild(row);
+    }
+
+    const button = document.createElement('button');
+    button.className = 'cs-vpset-btn';
+    button.type = 'button';
+    button.title = 'Viewport settings';
+    button.textContent = '◐';
+    button.addEventListener('click', (e) => {
+      e.stopPropagation();
+      popover.style.display = popover.style.display === 'none' ? 'block' : 'none';
+    });
+
+    // Close when clicking anywhere outside the popover
+    document.addEventListener('mousedown', (e) => {
+      if (popover.style.display !== 'none' && !container.contains(e.target)) {
+        popover.style.display = 'none';
+      }
+    });
+
+    container.appendChild(popover);
+    container.appendChild(button);
+  }
+
   _createTimelineOverlay() {
     this._timelineContainer = document.createElement('div');
     this._timelineContainer.className = 'cs-timeline';

@@ -11,6 +11,12 @@ class EditorManager {
     this._extraLibs = [];
     this._codeContainer = null;
     this._openscadProviders = [];
+    // Evaluation requested while the worker was busy; fired on completion.
+    this._queuedEval = null;
+    // True from evaluate start until the full evaluate+mesh promise settles.
+    // window.workerWorking is unreliable here: the worker resets it after code
+    // evaluation but before meshing, which would let evaluations overlap.
+    this._evalInFlight = false;
   }
 
   /** Initialize the editor panel inside a DockviewContainer. */
@@ -106,11 +112,39 @@ class EditorManager {
     if (this.editor) { this.editor.setValue(code); }
   }
 
-  /** Evaluate the current code: transpile if OpenSCAD, then send to worker via engine. */
-  evaluateCode(saveToURL = false) {
-    if (window.workerWorking) { return; }
-    if (!this._app.engine || !this._app.engine.isReady) { return; }
+  /** Evaluate the current code: transpile if OpenSCAD, then send to worker via engine.
+   *  With keepGUI (live slider updates), the control panel is left intact instead of
+   *  being rebuilt. Calls made while an evaluation is in flight coalesce into one
+   *  trailing evaluation that fires on completion, so the model always settles on
+   *  the latest GUI state.
+   *  Returns a promise that resolves once this request's evaluation (immediate or
+   *  queued) has fully completed, including meshing and rendering. */
+  evaluateCode(saveToURL = false, { keepGUI = false } = {}) {
+    return new Promise((resolve) => {
+      this._requestEval(saveToURL, keepGUI, resolve);
+    });
+  }
+
+  /** True while an evaluation is in flight or queued. */
+  get hasPendingEvaluation() {
+    return this._evalInFlight || !!this._queuedEval;
+  }
+
+  _requestEval(saveToURL, keepGUI, resolve) {
+    if (this._evalInFlight || window.workerWorking) {
+      // Coalesce: any queued full rebuild outranks a live (keepGUI) update,
+      // and a queued save-to-URL request is preserved
+      if (!this._queuedEval) {
+        this._queuedEval = { keepGUI: true, saveToURL: false, resolvers: [] };
+      }
+      this._queuedEval.keepGUI = this._queuedEval.keepGUI && keepGUI;
+      this._queuedEval.saveToURL = this._queuedEval.saveToURL || saveToURL;
+      this._queuedEval.resolvers.push(resolve);
+      return;
+    }
+    if (!this._app.engine || !this._app.engine.isReady) { resolve(); return; }
     window.workerWorking = true;
+    this._evalInFlight = true;
 
     monaco.languages.typescript.typescriptDefaults.setExtraLibs(this._extraLibs);
     let newCode = this.editor.getValue();
@@ -118,7 +152,11 @@ class EditorManager {
 
     // Clear console and refresh the GUI Panel
     this._app.console.clear();
-    this._app.gui.reset();
+    if (keepGUI) {
+      this._app.gui.beginLiveUpdate();
+    } else {
+      this._app.gui.reset();
+    }
     if (this._app.viewport) this._app.viewport.clearTransformHandles();
 
     // Transpile OpenSCAD if needed
@@ -128,7 +166,10 @@ class EditorManager {
         codeToEval = this._app._openscadTranspiler.transpile(newCode);
       } catch (e) {
         console.error("OpenSCAD transpile error: " + e.message);
+        this._app.gui.endLiveUpdate();
+        this._evalInFlight = false;
         window.workerWorking = false;
+        resolve();
         return;
       }
     }
@@ -136,6 +177,7 @@ class EditorManager {
     // Use CascadeEngine to evaluate and get mesh data
     this._app.engine.evaluate(codeToEval, {
       guiState: this._app.gui.state,
+      sceneOptions: this._app.viewport ? this._app.viewport.getSceneOptions() : undefined,
     }).then((result) => {
       if (this._app.viewport && result.meshData) {
         this._app.viewport.renderMeshData(result.meshData, result.sceneOptions);
@@ -143,6 +185,20 @@ class EditorManager {
     }).catch((err) => {
       console.error("Evaluation error: " + err.message);
       window.workerWorking = false;
+    }).finally(() => {
+      this._evalInFlight = false;
+      this._app.gui.endLiveUpdate();
+      resolve();
+      const queued = this._queuedEval;
+      if (queued) {
+        // Leave _queuedEval set until the deferred eval starts, so
+        // hasPendingEvaluation never reports idle while work remains
+        setTimeout(() => {
+          this._queuedEval = null;
+          const done = () => { queued.resolvers.forEach(r => r()); };
+          this._requestEval(queued.saveToURL, queued.keepGUI, done);
+        }, 0);
+      }
     });
 
     this._codeContainer.setState({ code: newCode });

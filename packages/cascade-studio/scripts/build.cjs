@@ -10,6 +10,7 @@ const pkgRoot = path.join(__dirname, '..');
 const monoRoot = path.join(pkgRoot, '..', '..');
 const coreRoot = path.join(monoRoot, 'packages', 'cascade-core');
 const distDir = path.join(pkgRoot, 'dist');
+const buildStamp = new Date().toISOString();
 
 // Clean dist directory
 if (fs.existsSync(distDir)) {
@@ -37,7 +38,7 @@ esbuild.buildSync({
     path: nodeShim,
     os: nodeShim,
   },
-  define: { ESBUILD: 'true' },
+  define: { ESBUILD: 'true', BUILD_STAMP: JSON.stringify(buildStamp) },
   absWorkingDir: monoRoot,
 });
 
@@ -88,7 +89,7 @@ for (const dir of ['css', 'textures', 'icon', 'lib']) {
     copyDirRecursive(src, path.join(distDir, dir));
   }
 }
-for (const file of ['manifest.webmanifest', 'service-worker.js']) {
+for (const file of ['manifest.webmanifest']) {
   const src = path.join(pkgRoot, file);
   if (fs.existsSync(src)) {
     fs.copyFileSync(src, path.join(distDir, file));
@@ -110,13 +111,18 @@ fs.writeFileSync(path.join(distDir, 'index.html'), `<!DOCTYPE html>
         <meta name="theme-color"        content="#1a1a2e">
         <meta name="cascade-api"        content="window.CascadeAPI">
 
-        <!-- Service Worker for offline access (must be first) -->
+        <!-- Chisel is a dev tool: no offline caching. Evict any service worker
+             left over from upstream CascadeStudio — it force-caches stale
+             bundles and breaks refresh semantics. (must be first) -->
         <script>
             if ('serviceWorker' in navigator) {
-                navigator.serviceWorker.register('service-worker.js').then(function(registration) {
-                    registration.update();
-                }, function() {
-                    console.log('Could not register Cascade Studio for offline use!');
+                navigator.serviceWorker.getRegistrations().then(function(regs) {
+                    regs.forEach(function(reg) { reg.unregister(); });
+                });
+            }
+            if (window.caches) {
+                caches.keys().then(function(keys) {
+                    keys.forEach(function(key) { caches.delete(key); });
                 });
             }
         </script>
@@ -166,7 +172,7 @@ fs.writeFileSync(path.join(distDir, 'index.html'), `<!DOCTYPE html>
             </div>
         </div>
         <div id="appbody">
-            <script type="module" src="./main.js"></script>
+            <script type="module" src="./main.js?v=${encodeURIComponent(buildStamp)}"></script>
         </div>
     </body>
 </html>

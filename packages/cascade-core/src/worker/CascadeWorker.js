@@ -35,6 +35,11 @@ class CascadeStudioWorker {
     self.messageHandlers["Evaluate"] = this.evaluate.bind(this);
     self.messageHandlers["combineAndRenderShapes"] = this.combineAndRenderShapes.bind(this);
     self.messageHandlers["meshHistoryStep"] = this.meshHistoryStep.bind(this);
+    // Escape hatch for stale cached shapes: dump the op cache so the next
+    // evaluation recomputes (and re-caches) everything from scratch
+    self.messageHandlers["clearCache"] = () => {
+      for (const hash in self.argCache) { delete self.argCache[hash]; }
+    };
   }
 
   /** Override console.log/error to forward messages to the main thread. */
@@ -156,7 +161,9 @@ class CascadeStudioWorker {
   /** Evaluate user CAD code (the contents of the Editor Window) and set the GUI State. */
   evaluate(payload) {
     self.opNumber = 0;
-    self.GUIState = payload.GUIState;
+    self.GUIState = payload.GUIState || {};
+    // Caching is always on unless the caller explicitly disables it
+    if (!("Cache?" in self.GUIState)) { self.GUIState["Cache?"] = true; }
 
     // Reset cache counters and modeling history for this evaluation
     this.standardLibrary.utils.cacheHits = 0;

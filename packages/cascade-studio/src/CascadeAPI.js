@@ -162,23 +162,9 @@ Revolve(profile, 360);`,
   getCode() { return this._app.editor.getCode(); }
 
   evaluate() {
-    if (this._evaluatePromise) { return this._evaluatePromise; }
-    this._evaluatePromise = new Promise((resolve) => {
-      // Listen for the engine's resetWorking event which fires when evaluation completes
-      const handler = () => {
-        this._app.engine.off('resetWorking', handler);
-        this._evaluatePromise = null;
-        resolve();
-      };
-      this._app.engine.on('resetWorking', handler);
-      this._app.editor.evaluateCode(false);
-      if (!window.workerWorking) {
-        this._app.engine.off('resetWorking', handler);
-        this._evaluatePromise = null;
-        resolve();
-      }
-    });
-    return this._evaluatePromise;
+    // Resolves when this evaluation (immediate or queued behind an in-flight
+    // one) has fully completed, including meshing and rendering.
+    return this._app.editor.evaluateCode(false);
   }
 
   getConsoleLog() { return this._app.console.getLogs(); }
@@ -203,7 +189,7 @@ Revolve(profile, 360);`,
   }
 
   isReady() { return this._app.engine && this._app.engine.isReady; }
-  isWorking() { return window.workerWorking; }
+  isWorking() { return window.workerWorking || this._app.editor.hasPendingEvaluation; }
 
   setMode(mode) {
     this._app.editor.setMode(mode);
