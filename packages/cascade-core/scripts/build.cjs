@@ -2,13 +2,12 @@
  * Build script for cascade-core.
  * Bundles the worker with esbuild, copies WASM + fonts.
  */
-const { execFileSync } = require('child_process');
+const esbuild = require('esbuild');
 const fs = require('fs');
 const path = require('path');
 
 const pkgRoot = path.join(__dirname, '..');
 const monoRoot = path.join(pkgRoot, '..', '..');
-const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 const distDir = path.join(pkgRoot, 'dist');
 
 // Clean dist directory
@@ -19,17 +18,20 @@ fs.mkdirSync(distDir, { recursive: true });
 
 // 1. Bundle the worker entry point
 console.log('[cascade-core] Bundling worker...');
-execFileSync(npx, [
-  'esbuild',
-  path.join(pkgRoot, 'src', 'worker', 'CascadeWorker.js'),
-  '--bundle', '--minify', '--keep-names', '--sourcemap',
-  '--format=esm', '--target=es2022',
-  '--outfile=' + path.join(distDir, 'cascade-worker.js'),
-  '--external:fs', '--external:path', '--external:os',
-  '--external:module', '--external:worker_threads',
-  '--loader:.wasm=file',
-  '--define:ESBUILD=true',
-], { cwd: monoRoot, stdio: 'inherit' });
+esbuild.buildSync({
+  entryPoints: [path.join(pkgRoot, 'src', 'worker', 'CascadeWorker.js')],
+  bundle: true,
+  minify: true,
+  keepNames: true,
+  sourcemap: true,
+  format: 'esm',
+  target: 'es2022',
+  outfile: path.join(distDir, 'cascade-worker.js'),
+  external: ['fs', 'path', 'os', 'module', 'worker_threads'],
+  loader: { '.wasm': 'file' },
+  define: { ESBUILD: 'true' },
+  absWorkingDir: monoRoot,
+});
 
 // 2. Copy OpenCascade WASM to dist/
 console.log('[cascade-core] Copying WASM...');

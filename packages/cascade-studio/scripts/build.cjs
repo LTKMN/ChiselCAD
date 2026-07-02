@@ -2,14 +2,13 @@
  * Build script for cascade-studio.
  * Bundles the main app JS, copies Monaco/assets, generates dist/index.html.
  */
-const { execFileSync } = require('child_process');
+const esbuild = require('esbuild');
 const fs = require('fs');
 const path = require('path');
 
 const pkgRoot = path.join(__dirname, '..');
 const monoRoot = path.join(pkgRoot, '..', '..');
 const coreRoot = path.join(monoRoot, 'packages', 'cascade-core');
-const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 const distDir = path.join(pkgRoot, 'dist');
 
 // Clean dist directory
@@ -21,20 +20,26 @@ fs.mkdirSync(distDir, { recursive: true });
 // 1. Bundle main app JS with esbuild
 console.log('[cascade-studio] Bundling main app...');
 const nodeShim = path.join(__dirname, 'node-shims.cjs');
-execFileSync(npx, [
-  'esbuild',
-  path.join(pkgRoot, 'src', 'main.js'),
-  '--bundle', '--minify', '--keep-names', '--sourcemap',
-  '--format=esm', '--target=es2022',
-  '--outdir=' + distDir, '--entry-names=[name]',
-  '--external:fs', '--external:path', '--external:os',
-  '--external:module', '--external:worker_threads',
-  '--alias:openscad-parser=' + path.join(pkgRoot, 'lib', 'openscad-parser', 'openscad-parser.js'),
-  '--alias:fs=' + nodeShim,
-  '--alias:path=' + nodeShim,
-  '--alias:os=' + nodeShim,
-  '--define:ESBUILD=true',
-], { cwd: monoRoot, stdio: 'inherit' });
+esbuild.buildSync({
+  entryPoints: [path.join(pkgRoot, 'src', 'main.js')],
+  bundle: true,
+  minify: true,
+  keepNames: true,
+  sourcemap: true,
+  format: 'esm',
+  target: 'es2022',
+  outdir: distDir,
+  entryNames: '[name]',
+  external: ['module', 'worker_threads'],
+  alias: {
+    'openscad-parser': path.join(pkgRoot, 'lib', 'openscad-parser', 'openscad-parser.js'),
+    fs: nodeShim,
+    path: nodeShim,
+    os: nodeShim,
+  },
+  define: { ESBUILD: 'true' },
+  absWorkingDir: monoRoot,
+});
 
 // 2. Copy cascade-core dist (worker bundle + WASM + fonts)
 console.log('[cascade-studio] Copying cascade-core dist...');
