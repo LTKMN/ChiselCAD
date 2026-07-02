@@ -1047,29 +1047,29 @@ function Slider(name = "Val", defaultValue = 0.5, min = 0.0, max = 1.0, realTime
     precision = 2;
   } else if (precision % 1) { console.error("Slider precision must be an integer"); }
 
-  postMessage({ "type": "addSlider", payload: { name: name, default: defaultValue, min: min, max: max, realTime: realTime, step: step, dp: precision } });
+  postMessage({ "type": "addSlider", payload: { name: name, default: defaultValue, min: min, max: max, realTime: realTime, step: step, dp: precision, lineNumber: self.getCallingLocation()[0] } });
   return self.GUIState[name];
 }
 
 function Button(name = "Action") {
-  postMessage({ "type": "addButton", payload: { name: name } });
+  postMessage({ "type": "addButton", payload: { name: name, lineNumber: self.getCallingLocation()[0] } });
 }
 
 function Checkbox(name = "Toggle", defaultValue = false) {
   if (!(name in self.GUIState)) { self.GUIState[name] = defaultValue; }
-  postMessage({ "type": "addCheckbox", payload: { name: name, default: defaultValue } });
+  postMessage({ "type": "addCheckbox", payload: { name: name, default: defaultValue, lineNumber: self.getCallingLocation()[0] } });
   return self.GUIState[name];
 }
 
 function TextInput(name = "Text", defaultValue = "", realTime = false) {
   if (!(name in self.GUIState)) { self.GUIState[name] = defaultValue; }
-  postMessage({ "type": "addTextbox", payload: { name: name, default: defaultValue, realTime: realTime } });
+  postMessage({ "type": "addTextbox", payload: { name: name, default: defaultValue, realTime: realTime, lineNumber: self.getCallingLocation()[0] } });
   return self.GUIState[name];
 }
 
 function Dropdown(name = "Dropdown", defaultValue = "", options = {}, realTime = false) {
   if (!(name in self.GUIState)) { self.GUIState[name] = defaultValue; }
-  postMessage({ "type": "addDropdown", payload: { name: name, default: defaultValue, options: options, realTime: realTime } });
+  postMessage({ "type": "addDropdown", payload: { name: name, default: defaultValue, options: options, realTime: realTime, lineNumber: self.getCallingLocation()[0] } });
   return self.GUIState[name];
 }
 

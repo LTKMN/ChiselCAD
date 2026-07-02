@@ -81,12 +81,13 @@ class CascadeEngine {
 
     this._working = false;
 
-    if (!result) return { meshData: null, sceneOptions: {} };
+    if (!result) return { meshData: null, sceneOptions: {}, shapeRanges: [] };
 
-    const [[faces, edges], resultSceneOptions] = result;
+    const [[faces, edges], resultSceneOptions, shapeRanges] = result;
     return {
       meshData: { faces, edges },
-      sceneOptions: resultSceneOptions || {}
+      sceneOptions: resultSceneOptions || {},
+      shapeRanges: shapeRanges || []
     };
   }
 
@@ -94,6 +95,14 @@ class CascadeEngine {
   async meshHistoryStep(stepIndex, maxDeviation = 0.1) {
     return this._messageBus.request('meshHistoryStep', {
       stepIndex,
+      maxDeviation
+    });
+  }
+
+  /** Triangulate the shapes produced by the op(s) on a source line (or null). */
+  async meshShapesAtLine(lineNumber, maxDeviation = 0.3) {
+    return this._messageBus.request('meshShapesAtLine', {
+      lineNumber,
       maxDeviation
     });
   }

@@ -35,6 +35,7 @@ class CascadeStudioWorker {
     self.messageHandlers["Evaluate"] = this.evaluate.bind(this);
     self.messageHandlers["combineAndRenderShapes"] = this.combineAndRenderShapes.bind(this);
     self.messageHandlers["meshHistoryStep"] = this.meshHistoryStep.bind(this);
+    self.messageHandlers["meshShapesAtLine"] = this.meshShapesAtLine.bind(this);
     // Escape hatch for stale cached shapes: dump the op cache so the next
     // evaluation recomputes (and re-caches) everything from scratch
     self.messageHandlers["clearCache"] = () => {
@@ -193,6 +194,9 @@ class CascadeStudioWorker {
           fnName: step.fnName,
           lineNumber: step.lineNumber,
           shapeCount: step.shapeCount,
+          // Shape hashes present after this step — lets the main thread map
+          // scene shapes back to the line of the op that created them
+          hashes: step.shapes.map(s => (s && s.hash !== undefined) ? s.hash : null),
         }))
       });
 
@@ -221,6 +225,10 @@ class CascadeStudioWorker {
 
     // If there are sceneShapes, iterate through them and add them to currentShape
     if (self.sceneShapes.length > 0) {
+      // Provenance: hash + face count per scene shape, in compound order.
+      // The viewport uses the cumulative face ranges to map a clicked face
+      // back to the shape (and thus the code line) that produced it.
+      let shapeRanges = [];
       for (let shapeInd = 0; shapeInd < self.sceneShapes.length; shapeInd++) {
         if (!self.sceneShapes[shapeInd] || !self.sceneShapes[shapeInd].IsNull || self.sceneShapes[shapeInd].IsNull()) {
           console.error("Null Shape detected in sceneShapes; skipping: " + JSON.stringify(self.sceneShapes[shapeInd]));
@@ -235,8 +243,14 @@ class CascadeStudioWorker {
 
         // Scan the edges and faces and add to the edge list
         Object.assign(fullShapeEdgeHashes, self.ForEachEdge(self.sceneShapes[shapeInd], (index, edge) => { }));
+        let faceCount = 0;
         self.ForEachFace(self.sceneShapes[shapeInd], (index, face) => {
           fullShapeFaceHashes[self.oc.OCJS.HashCode(face, 100000000)] = index;
+          faceCount++;
+        });
+        shapeRanges.push({
+          hash: self.sceneShapes[shapeInd].hash !== undefined ? self.sceneShapes[shapeInd].hash : null,
+          faceCount: faceCount,
         });
 
         sceneBuilder.Add(self.currentShape, self.sceneShapes[shapeInd]);
@@ -248,7 +262,7 @@ class CascadeStudioWorker {
         payload.maxDeviation || 0.1, fullShapeEdgeHashes, fullShapeFaceHashes);
       self.sceneShapes = [];
       postMessage({ "type": "Progress", "payload": { "opNumber": self.opNumber, "opType": "" } });
-      return [facesAndEdges, payload.sceneOptions];
+      return [facesAndEdges, payload.sceneOptions, shapeRanges];
     } else {
       console.error("There were no scene shapes returned!");
     }
@@ -280,6 +294,50 @@ class CascadeStudioWorker {
 
     let facesAndEdges = self.ShapeToMesh(compound, payload.maxDeviation || 0.1, edgeHashes, faceHashes);
     return facesAndEdges;
+  }
+
+  /** Triangulate the shapes that the op(s) on a given source line produced:
+   *  the delta between each matching history step and the step before it.
+   *  Used by the editor's cursor-to-3D highlight. Returns null if the line
+   *  has no ops or the delta is empty. */
+  meshShapesAtLine(payload) {
+    const history = self.modelHistory;
+    if (!history || history.length === 0) return null;
+
+    let oc = self.oc;
+    let deltaShapes = [];
+    let seenHashes = {};
+    for (let i = 0; i < history.length; i++) {
+      if (history[i].lineNumber !== payload.lineNumber) continue;
+      const prevHashes = {};
+      if (i > 0) {
+        for (const s of history[i - 1].shapes) {
+          if (s && s.hash !== undefined) { prevHashes[s.hash] = true; }
+        }
+      }
+      for (const s of history[i].shapes) {
+        if (!s || s.IsNull()) continue;
+        const h = s.hash;
+        if (h !== undefined && (prevHashes[h] || seenHashes[h])) continue;
+        if (h !== undefined) { seenHashes[h] = true; }
+        deltaShapes.push(s);
+      }
+    }
+    if (deltaShapes.length === 0) return null;
+
+    let compound = new oc.TopoDS_Compound();
+    let builder = new oc.BRep_Builder();
+    builder.MakeCompound(compound);
+    let edgeHashes = {};
+    let faceHashes = {};
+    for (let shape of deltaShapes) {
+      Object.assign(edgeHashes, self.ForEachEdge(shape, () => {}));
+      self.ForEachFace(shape, (index, face) => {
+        faceHashes[oc.OCJS.HashCode(face, 100000000)] = index;
+      });
+      builder.Add(compound, shape);
+    }
+    return self.ShapeToMesh(compound, payload.maxDeviation || 0.3, edgeHashes, faceHashes);
   }
 }
 

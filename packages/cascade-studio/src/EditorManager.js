@@ -17,6 +17,11 @@ class EditorManager {
     // window.workerWorking is unreliable here: the worker resets it after code
     // evaluation but before meshing, which would let evaluations overlap.
     this._evalInFlight = false;
+    // Debounce timer for live evaluation while typing
+    this._liveEvalTimer = null;
+    // Suppresses live evaluation during programmatic setValue calls — those
+    // paths (project load, mode switch, runCode) evaluate explicitly themselves
+    this._suppressLiveEval = false;
   }
 
   /** Initialize the editor panel inside a DockviewContainer. */
@@ -87,6 +92,31 @@ class EditorManager {
     });
     window.monacoEditor = this.editor;
 
+    // Live evaluation: re-evaluate shortly after the user stops typing, so the
+    // model, GUI panel, and console track the code without needing F5
+    this.editor.onDidChangeModelContent(() => {
+      this.clearLineageHighlight();
+      if (this._suppressLiveEval) { return; }
+      clearTimeout(this._liveEvalTimer);
+      this._liveEvalTimer = setTimeout(() => { this.evaluateCode(); }, 600);
+    });
+
+    // Cursor-line highlighting: light up the GUI control / 3D geometry that
+    // the op under the cursor produced. OpenSCAD mode is excluded — its line
+    // numbers refer to the transpiled JS, not what the user sees.
+    this.editor.onDidChangeCursorPosition((e) => {
+      // Lineage highlight survives as long as the cursor stays in its block
+      if (this._lineageLines && !this._lineageLines.has(e.position.lineNumber)) {
+        this.clearLineageHighlight();
+      }
+      clearTimeout(this._cursorLineTimer);
+      this._cursorLineTimer = setTimeout(() => {
+        const line = (this.mode === 'cascadestudio') ? e.position.lineNumber : -1;
+        this._app.gui.highlightControlsAtLine(line);
+        if (this._app.viewport) { this._app.viewport.highlightShapesAtLine(line); }
+      }, 150);
+    });
+
     // Collapse all top-level functions in the Editor
     this._collapseTopLevelFunctions(state.code);
 
@@ -107,9 +137,55 @@ class EditorManager {
     return this.editor ? this.editor.getValue() : '';
   }
 
-  /** Set the code in the editor. */
+  /** Move the cursor to a line, scroll it into view, and focus the editor. */
+  revealLine(lineNumber) {
+    if (!this.editor || !lineNumber || lineNumber < 1) { return; }
+    this.editor.setPosition({ lineNumber: lineNumber, column: 1 });
+    this.editor.revealLineInCenterIfOutsideViewport(lineNumber);
+    this.editor.focus();
+  }
+
+  /** Highlight a shape's lineage: tint every contributing line, scroll the
+   *  block into view, and put the cursor on focusLine. The highlight clears
+   *  when the cursor leaves the block or the code changes. */
+  highlightLineage(lines, focusLine) {
+    if (!this.editor || !lines || lines.length === 0) { return; }
+    this.clearLineageHighlight();
+
+    this._lineageLines = new Set(lines);
+    this._lineageDecorations = this.editor.createDecorationsCollection(lines.map(l => ({
+      range: new monaco.Range(l, 1, l, 1),
+      options: {
+        isWholeLine: true,
+        className: 'cs-lineage-line',
+        linesDecorationsClassName: 'cs-lineage-gutter',
+      },
+    })));
+
+    const minLine = Math.min(...lines), maxLine = Math.max(...lines);
+    this.editor.revealRangeInCenterIfOutsideViewport(new monaco.Range(minLine, 1, maxLine, 1));
+    this.editor.setPosition({ lineNumber: focusLine, column: 1 });
+    this.editor.focus();
+  }
+
+  /** Remove the lineage highlight, if present. */
+  clearLineageHighlight() {
+    if (this._lineageDecorations) {
+      this._lineageDecorations.clear();
+      this._lineageDecorations = null;
+    }
+    this._lineageLines = null;
+  }
+
+  /** Set the code in the editor (programmatic — does not trigger live evaluation). */
   setCode(code) {
-    if (this.editor) { this.editor.setValue(code); }
+    if (!this.editor) { return; }
+    this._suppressLiveEval = true;
+    try {
+      this.editor.setValue(code);
+    } finally {
+      this._suppressLiveEval = false;
+    }
   }
 
   /** Evaluate the current code: transpile if OpenSCAD, then send to worker via engine.
@@ -180,7 +256,7 @@ class EditorManager {
       sceneOptions: this._app.viewport ? this._app.viewport.getSceneOptions() : undefined,
     }).then((result) => {
       if (this._app.viewport && result.meshData) {
-        this._app.viewport.renderMeshData(result.meshData, result.sceneOptions);
+        this._app.viewport.renderMeshData(result.meshData, result.sceneOptions, result.shapeRanges);
       }
     }).catch((err) => {
       console.error("Evaluation error: " + err.message);
@@ -227,9 +303,9 @@ class EditorManager {
     const csStarter = this._app.constructor.STARTER_CODE;
     const osStarter = this._app.constructor.OPENSCAD_STARTER_CODE;
     if (newMode === 'openscad' && osStarter && currentCode === csStarter) {
-      this.editor.setValue(osStarter);
+      this.setCode(osStarter);
     } else if (newMode === 'cascadestudio' && currentCode === osStarter) {
-      this.editor.setValue(csStarter);
+      this.setCode(csStarter);
     }
 
     // Fit camera on the next render after a mode switch

@@ -450,3 +450,21 @@ body {
   cursor: pointer;
   margin: 0;
 }
+
+/* Highlight for GUI controls defined on the line under the editor cursor */
+.cs-gui-hot {
+  outline: 1px solid var(--cs-accent);
+  outline-offset: 1px;
+  border-radius: var(--cs-radius);
+  box-shadow: 0 0 8px rgba(76, 175, 80, 0.35);
+}
+
+/* Lineage highlight: every code line that contributed to the clicked shape */
+.cs-lineage-line {
+  background: rgba(76, 175, 80, 0.10);
+}
+.cs-lineage-gutter {
+  background: var(--cs-accent);
+  width: 3px !important;
+  margin-left: 2px;
+}

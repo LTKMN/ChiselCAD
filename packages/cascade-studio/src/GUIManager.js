@@ -38,7 +38,7 @@ class GUIManager {
 
       this._addSeparator();
       const slider = this._gui.addBinding(this.state, payload.name, params);
-      this._controls[key] = slider;
+      this._controls[key] = { api: slider, lineNumber: payload.lineNumber };
 
       // Live update: re-evaluate on every tick while dragging. keepGUI leaves
       // the pane intact so the slider isn't destroyed under the pointer, and
@@ -53,7 +53,7 @@ class GUIManager {
       const buttonParams = { title: payload.name };
       if (payload.label) { buttonParams.label = payload.label; }
       const button = this._gui.addButton(buttonParams);
-      this._controls[key] = button;
+      this._controls[key] = { api: button, lineNumber: payload.lineNumber };
       if (typeof payload.callback === 'function') {
         button.on('click', payload.callback);
       } else {
@@ -67,7 +67,7 @@ class GUIManager {
       if (this._hasControl(key)) { return; }
       this._addSeparator();
       const checkbox = this._gui.addBinding(this.state, payload.name);
-      this._controls[key] = checkbox;
+      this._controls[key] = { api: checkbox, lineNumber: payload.lineNumber };
       checkbox.on('change', () => {
         this._delayReload();
       });
@@ -79,7 +79,7 @@ class GUIManager {
       if (this._hasControl(key)) { return; }
       this._addSeparator();
       const input = this._gui.addBinding(this.state, payload.name);
-      this._controls[key] = input;
+      this._controls[key] = { api: input, lineNumber: payload.lineNumber };
       input.on('change', e => {
         if (e.last) { this._delayReload(); }
       });
@@ -92,13 +92,26 @@ class GUIManager {
       const options = payload.options || {};
       this._addSeparator();
       const input = this._gui.addBinding(this.state, payload.name, { options });
-      this._controls[key] = input;
+      this._controls[key] = { api: input, lineNumber: payload.lineNumber };
       input.on('change', () => { this._delayReload(); });
     };
 
     // Register with the engine event system
     for (const type of Object.keys(this._handlers)) {
       engine.on(type, this._handlers[type]);
+    }
+  }
+
+  /** Highlight the control(s) defined on the given source line; pass a
+   *  non-matching line (or -1) to clear. */
+  highlightControlsAtLine(lineNumber) {
+    for (const key in this._controls) {
+      const entry = this._controls[key];
+      if (!entry.api || !entry.api.element) { continue; }
+      entry.api.element.classList.toggle(
+        'cs-gui-hot',
+        entry.lineNumber !== undefined && entry.lineNumber === lineNumber
+      );
     }
   }
 

@@ -134,6 +134,13 @@ class CascadeEnvironment {
     this._historyPending = false;  // True while awaiting worker mesh response
     this._lastSceneOptions = {};
 
+    // Cursor-line → 3D highlight state
+    this._lineHighlightObject = null;  // THREE.Group overlay for the highlighted line
+    this._lineHighlightCache = {};     // lineNumber → meshData (cleared per evaluation)
+    this._highlightedLine = null;
+    // Click → code state: per-scene-shape {hash, faceCount} in mesh order
+    this._shapeRanges = [];
+
     // Fit camera on first render so the orbit target centers on the model
     this._isFirstRender = true;
 
@@ -143,6 +150,20 @@ class CascadeEnvironment {
       this.mouse.x =   (event.offsetX / this.goldenContainer.width) * 2 - 1;
       this.mouse.y = - (event.offsetY / this.goldenContainer.height) * 2 + 1;
     }, false);
+
+    // Click (not orbit-drag) on the model → jump to the code line that made it
+    const canvas = this.environment.renderer.domElement;
+    canvas.addEventListener('mousedown', (e) => {
+      if (e.button === 0) { this._clickStart = { x: e.clientX, y: e.clientY }; }
+    });
+    canvas.addEventListener('mouseup', (e) => {
+      const start = this._clickStart;
+      this._clickStart = null;
+      if (!start || e.button !== 0) { return; }
+      const dx = e.clientX - start.x, dy = e.clientY - start.y;
+      if (dx * dx + dy * dy > 25) { return; } // that was an orbit/pan drag
+      this._jumpToCodeAtMouse(e);
+    });
 
     // Viewport display settings (app-level, not per-model) — persisted locally
     this._viewportSettings = { groundPlane: true, grid: true };
@@ -166,13 +187,19 @@ class CascadeEnvironment {
 
   /** Render mesh data received from the engine.
    *  Replaces the old _registerRenderCallback / "combineAndRenderShapes" handler. */
-  renderMeshData(meshData, sceneOptions) {
+  renderMeshData(meshData, sceneOptions, shapeRanges) {
     if (!meshData) return;
     const { faces: facelist, edges: edgelist } = meshData;
     window.workerWorking = false;
     if (!facelist) { return; }
     if (!sceneOptions) { sceneOptions = {}; }
     this._lastSceneOptions = sceneOptions;
+
+    // New evaluation: stale provenance and line highlights are invalid
+    this._shapeRanges = shapeRanges || [];
+    this._lineHighlightCache = {};
+    this._highlightedLine = null;
+    this._clearLineHighlight();
 
     // The old mainObject is dead! Long live the mainObject!
     this.environment.scene.remove(this.mainObject);
@@ -374,6 +401,141 @@ class CascadeEnvironment {
   }
 
   /** Create the timeline overlay DOM elements. */
+  /** Highlight the geometry produced by the op(s) on a source line with a
+   *  translucent overlay. Pass a line with no ops (or -1) to clear. */
+  highlightShapesAtLine(lineNumber) {
+    if (lineNumber === this._highlightedLine) { return; }
+    this._highlightedLine = lineNumber;
+
+    const hasOp = this._historySteps.some(s => s.lineNumber === lineNumber);
+    if (!hasOp) { this._clearLineHighlight(); return; }
+
+    const cached = this._lineHighlightCache[lineNumber];
+    if (cached !== undefined) { this._showLineHighlight(cached); return; }
+
+    // Don't queue highlight meshing behind an active evaluation — the cursor
+    // will re-trigger once things settle
+    if (window.workerWorking) { return; }
+
+    this._app.engine.meshShapesAtLine(lineNumber).then((meshData) => {
+      this._lineHighlightCache[lineNumber] = meshData || null;
+      if (this._highlightedLine === lineNumber) { this._showLineHighlight(meshData); }
+    }).catch(() => { /* worker busy or line vanished — next cursor move retries */ });
+  }
+
+  /** Replace the current line-highlight overlay with one built from meshData. */
+  _showLineHighlight(meshData) {
+    this._clearLineHighlight();
+    if (!meshData) { return; }
+    const [facelist] = meshData;
+    if (!facelist || facelist.length === 0) { return; }
+
+    const vertices = [], triangles = [];
+    let vInd = 0;
+    facelist.forEach((face) => {
+      vertices.push(...face.vertex_coord);
+      for (let i = 0; i < face.tri_indexes.length; i += 3) {
+        triangles.push(
+          face.tri_indexes[i + 0] + vInd,
+          face.tri_indexes[i + 1] + vInd,
+          face.tri_indexes[i + 2] + vInd
+        );
+      }
+      vInd += face.vertex_coord.length / 3;
+    });
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setIndex(triangles);
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x4CAF50, transparent: true, opacity: 0.35,
+      depthWrite: false, polygonOffset: true,
+      polygonOffsetFactor: -4.0, polygonOffsetUnits: -4.0,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = 999;
+
+    const group = new THREE.Group();
+    group.rotation.x = -Math.PI / 2;  // same OCC Z-up → Three Y-up mapping as the model
+    group.add(mesh);
+
+    this._lineHighlightObject = group;
+    this.environment.scene.add(group);
+    this.environment.viewDirty = true;
+  }
+
+  /** Remove the line-highlight overlay, if any. */
+  _clearLineHighlight() {
+    if (!this._lineHighlightObject) { return; }
+    this.environment.scene.remove(this._lineHighlightObject);
+    this._lineHighlightObject.traverse((o) => {
+      if (o.geometry) { o.geometry.dispose(); }
+      if (o.material) { o.material.dispose(); }
+    });
+    this._lineHighlightObject = null;
+    this.environment.viewDirty = true;
+  }
+
+  /** Raycast a click against the model; jump the editor to the line whose op
+   *  created the clicked shape. */
+  _jumpToCodeAtMouse(event) {
+    if (!this.mainObject || this._shapeRanges.length === 0) { return; }
+
+    const canvas = this.environment.renderer.domElement;
+    const rect = canvas.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    this.raycaster.setFromCamera(ndc, this.environment.camera);
+    const hits = this.raycaster.intersectObject(this.mainObject, true);
+    const hit = hits.find(h => h.object.name === "Model Faces");
+    if (!hit || !hit.face) { return; }
+
+    // The mesh's color channel packs (local face index, global face index, 0)
+    const globalFaceIndex = hit.object.geometry.getAttribute('color').getY(hit.face.a);
+
+    // Map global face index → scene shape via cumulative face ranges
+    let cumulative = 0, hash = null;
+    for (const range of this._shapeRanges) {
+      cumulative += range.faceCount;
+      if (globalFaceIndex < cumulative) { hash = range.hash; break; }
+    }
+    if (hash === null || hash === undefined) { return; }
+
+    // Highlight the shape's full lineage — every line whose op contributed to
+    // it — with the cursor at the block's first (defining) line
+    const lines = this._lineageLines(hash);
+    if (lines.length === 0) { return; }
+    this._app.editor.highlightLineage(lines, Math.min(...lines));
+  }
+
+  /** All source lines that contributed to building the shape with this hash:
+   *  the op that created it, the ops that created the shapes it consumed, and
+   *  so on back to the first primitive. Derived from history hash sets — an
+   *  op's parents are the shapes present before it but gone after it. */
+  _lineageLines(hash) {
+    const steps = this._historySteps;
+    const hashSets = steps.map(s => new Set((s.hashes || []).filter(h => h !== null && h !== undefined)));
+
+    const lines = new Set();
+    const visited = new Set();
+    const visit = (h) => {
+      if (h === null || h === undefined || visited.has(h)) { return; }
+      visited.add(h);
+      const k = hashSets.findIndex(set => set.has(h));
+      if (k === -1) { return; }
+      if (steps[k].lineNumber >= 1) { lines.add(steps[k].lineNumber); }
+      if (k > 0) {
+        for (const parent of hashSets[k - 1]) {
+          if (!hashSets[k].has(parent)) { visit(parent); }
+        }
+      }
+    };
+    visit(hash);
+    return [...lines];
+  }
+
   /** Scene options derived from viewport settings, sent with each evaluation. */
   getSceneOptions() {
     return {
