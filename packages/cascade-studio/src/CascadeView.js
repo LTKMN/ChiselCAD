@@ -80,7 +80,14 @@ class Environment {
       window.innerWidth,
       window.innerHeight - document.getElementsByClassName('topnav')[0].offsetHeight
     );
-    this.camera.aspect = this.goldenContainer.width / this.goldenContainer.height;
+    const aspect = this.goldenContainer.width / this.goldenContainer.height;
+    if (this.camera.isOrthographicCamera) {
+      const halfH = (this.camera.top - this.camera.bottom) / 2;
+      this.camera.left = -halfH * aspect;
+      this.camera.right = halfH * aspect;
+    } else {
+      this.camera.aspect = aspect;
+    }
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(this.goldenContainer.width, this.goldenContainer.height);
     this.renderer.render(this.scene, this.camera);
@@ -162,6 +169,9 @@ class CascadeEnvironment {
       if (!start || e.button !== 0) { return; }
       const dx = e.clientX - start.x, dy = e.clientY - start.y;
       if (dx * dx + dy * dy > 25) { return; } // that was an orbit/pan drag
+      if (this.sketchActive) { return; }      // sketch mode owns clicks
+      // Feature pick mode (Cut/Union/Fillet target selection) eats clicks
+      if (this._app.sketchMode && this._app.sketchMode.handleViewportClick(e)) { return; }
       this._jumpToCodeAtMouse(e);
     });
 
@@ -476,10 +486,10 @@ class CascadeEnvironment {
     this.environment.viewDirty = true;
   }
 
-  /** Raycast a click against the model; jump the editor to the line whose op
-   *  created the clicked shape. */
-  _jumpToCodeAtMouse(event) {
-    if (!this.mainObject || this._shapeRanges.length === 0) { return; }
+  /** Raycast a mouse event against the model → the clicked scene shape's
+   *  history hash, or null. */
+  _shapeHashAtMouse(event) {
+    if (!this.mainObject || this._shapeRanges.length === 0) { return null; }
 
     const canvas = this.environment.renderer.domElement;
     const rect = canvas.getBoundingClientRect();
@@ -490,17 +500,33 @@ class CascadeEnvironment {
     this.raycaster.setFromCamera(ndc, this.environment.camera);
     const hits = this.raycaster.intersectObject(this.mainObject, true);
     const hit = hits.find(h => h.object.name === "Model Faces");
-    if (!hit || !hit.face) { return; }
+    if (!hit || !hit.face) { return null; }
 
     // The mesh's color channel packs (local face index, global face index, 0)
     const globalFaceIndex = hit.object.geometry.getAttribute('color').getY(hit.face.a);
 
     // Map global face index → scene shape via cumulative face ranges
-    let cumulative = 0, hash = null;
+    let cumulative = 0;
     for (const range of this._shapeRanges) {
       cumulative += range.faceCount;
-      if (globalFaceIndex < cumulative) { hash = range.hash; break; }
+      if (globalFaceIndex < cumulative) { return range.hash; }
     }
+    return null;
+  }
+
+  /** The shape under the mouse and the source line of the op that created it
+   *  (its first appearance in the history). Used by feature pick mode. */
+  shapeInfoAtMouse(event) {
+    const hash = this._shapeHashAtMouse(event);
+    if (hash === null || hash === undefined) { return null; }
+    const step = this._historySteps.find(s => (s.hashes || []).includes(hash));
+    return { hash, definingLine: (step && step.lineNumber >= 1) ? step.lineNumber : -1 };
+  }
+
+  /** Raycast a click against the model; jump the editor to the line whose op
+   *  created the clicked shape. */
+  _jumpToCodeAtMouse(event) {
+    const hash = this._shapeHashAtMouse(event);
     if (hash === null || hash === undefined) { return; }
 
     // Highlight the shape's full lineage — every line whose op contributed to
@@ -886,7 +912,7 @@ class CascadeEnvironment {
 
     requestAnimationFrame(() => this._animate());
 
-    if (this.mainObject) {
+    if (this.mainObject && !this.sketchActive) {
       this.raycaster.setFromCamera(this.mouse, this.environment.camera);
       let intersects = this.raycaster.intersectObjects(this.mainObject.children);
       if (this.environment.controls.state < 0 && intersects.length > 0) {

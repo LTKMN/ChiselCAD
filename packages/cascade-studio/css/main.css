@@ -236,8 +236,9 @@ body {
 
 .gui-panel {
   position: absolute;
+  top: 36px; /* below the viewport command bar */
   right: 0;
-  max-height: 100%;
+  max-height: calc(100% - 36px);
   overflow-y: auto;
   z-index: 10;
 }
@@ -467,4 +468,127 @@ body {
   background: var(--cs-accent);
   width: 3px !important;
   margin-left: 2px;
+}
+
+/* --- Sketch mode: topnav plane picker --- */
+.cs-plane-pop {
+  position: fixed;
+  z-index: 100;
+  background: var(--cs-bg-surface);
+  border: 1px solid var(--cs-border);
+  border-radius: var(--cs-radius);
+  padding: 4px;
+  min-width: 140px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+.cs-plane-pop a {
+  display: block;
+  padding: 6px 12px !important;
+  color: var(--cs-text-primary);
+  text-decoration: none;
+  font-size: 13px;
+  font-family: var(--cs-font-ui);
+  border-radius: 3px;
+}
+.cs-plane-pop a:hover {
+  background: var(--cs-accent);
+  color: #fff;
+}
+
+/* --- Command bar at the top of the CAD viewport (SolidWorks-style):
+       feature buttons normally, sketch tools while sketching --- */
+.cs-featbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  background: rgba(17, 17, 17, 0.82);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--cs-border);
+  padding: 3px 8px;
+}
+.cs-featbar-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+.cs-featbar-hint {
+  color: var(--cs-text-muted);
+  font-size: 11px;
+  padding: 2px 4px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sketch-ribbon-plane {
+  color: var(--cs-accent);
+  font-family: var(--cs-font-mono);
+  font-size: 12px;
+  padding: 0 10px 0 4px;
+  white-space: nowrap;
+}
+.sketch-tool-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--cs-radius);
+  color: var(--cs-text-primary);
+  font-size: 13px;
+  font-family: var(--cs-font-ui);
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--cs-transition), border-color var(--cs-transition), color var(--cs-transition);
+}
+.sketch-tool-btn:hover {
+  background: var(--cs-bg-elevated);
+}
+.sketch-tool-btn.active {
+  border-color: var(--cs-accent);
+  color: var(--cs-accent);
+}
+.sketch-save-btn {
+  color: var(--cs-accent);
+}
+.sketch-ribbon-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--cs-border);
+  margin: 0 6px;
+  flex-shrink: 0;
+}
+/* --- Sketch mode: dimension input box --- */
+.cs-dim-box {
+  position: absolute;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  background: var(--cs-bg-elevated);
+  border: 1px solid var(--cs-accent);
+  border-radius: var(--cs-radius);
+  padding: 3px 4px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+.cs-dim-box .cs-dim-kind {
+  color: var(--cs-text-muted);
+  font-family: var(--cs-font-mono);
+  font-size: 11px;
+  padding: 0 5px;
+}
+.cs-dim-box input {
+  background: var(--cs-bg-primary);
+  color: var(--cs-text-primary);
+  border: none;
+  outline: none;
+  font-family: var(--cs-font-mono);
+  font-size: 13px;
+  width: 110px;
+  padding: 3px 6px;
+  border-radius: 2px;
+}
+.cs-dim-box input.cs-dim-bad {
+  color: #ff7043;
 }

@@ -177,6 +177,39 @@ class EditorManager {
     this._lineageLines = null;
   }
 
+  /** Append a code snippet to the end of the document as a single undoable
+   *  edit, reveal it, and focus the editor. Live evaluation picks up the
+   *  change like any other edit. Used by SketchMode to commit sketches and
+   *  feature templates. selectToken (a regex string) selects the first match
+   *  within the inserted text so the key value can be typed over directly. */
+  appendCode(snippet, selectToken) {
+    if (!this.editor) { return; }
+    const model = this.editor.getModel();
+    const lastLine = model.getLineCount();
+    const lastCol = model.getLineMaxColumn(lastLine);
+    const prefix = model.getValue().trim().length > 0 ? '\n\n' : '';
+    this.editor.executeEdits('chisel-sketch', [{
+      range: new monaco.Range(lastLine, lastCol, lastLine, lastCol),
+      text: prefix + snippet + '\n',
+    }]);
+    const endLine = model.getLineCount();
+    let selected = false;
+    if (selectToken) {
+      const matches = model.findMatches(
+        selectToken,
+        new monaco.Range(lastLine, 1, endLine, model.getLineMaxColumn(endLine)),
+        true, true, null, false
+      );
+      if (matches.length > 0) {
+        this.editor.setSelection(matches[0].range);
+        this.editor.revealRangeInCenter(matches[0].range);
+        selected = true;
+      }
+    }
+    if (!selected) { this.editor.revealLineInCenter(endLine); }
+    this.editor.focus();
+  }
+
   /** Set the code in the editor (programmatic — does not trigger live evaluation). */
   setCode(code) {
     if (!this.editor) { return; }

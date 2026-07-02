@@ -9,6 +9,7 @@ import { ConsoleManager } from './ConsoleManager.js';
 import { GUIManager } from './GUIManager.js';
 import { OpenSCADMonaco } from './openscad/OpenSCADMonaco.js';
 import { CascadeAPI } from './CascadeAPI.js';
+import { SketchMode } from './SketchMode.js';
 import { deflateSync, inflateSync, strToU8, strFromU8 } from 'fflate';
 
 /** Adapter that wraps a dockview panel to provide a Golden-Layout-compatible container API.
@@ -93,6 +94,9 @@ class CascadeStudioApp {
     // Install the programmatic API
     this.api = new CascadeAPI(this);
     this.api.install();
+
+    // In-viewport sketching (topnav "New Sketch" button + tool ribbon)
+    this.sketchMode = new SketchMode(this);
 
     // Register OpenSCAD language with Monaco (for syntax highlighting)
     this._openscadMonaco.registerLanguage();
@@ -222,9 +226,8 @@ class CascadeStudioApp {
     const appBody = document.getElementById("appbody");
     appBody.innerHTML = '';
 
-    // Set layout height
-    const topnavHeight = document.getElementById('topnav').offsetHeight;
-    appBody.style.height = (window.innerHeight - topnavHeight) + 'px';
+    // Set layout height (everything above the app body counts: topnav, sketch ribbon, ...)
+    appBody.style.height = (window.innerHeight - appBody.getBoundingClientRect().top) + 'px';
 
     this._dockviewApi = createDockview(appBody, {
       className: 'dockview-theme-dark',
@@ -336,7 +339,7 @@ class CascadeStudioApp {
       window.removeEventListener('orientationchange', this._updateLayoutSize);
     }
     this._updateLayoutSize = () => {
-      const h = window.innerHeight - document.getElementById('topnav').offsetHeight;
+      const h = window.innerHeight - appBody.getBoundingClientRect().top;
       appBody.style.height = h + 'px';
     };
     window.addEventListener('resize', this._updateLayoutSize);
@@ -364,6 +367,9 @@ class CascadeStudioApp {
       CascadeStudioApp.getNewFileHandle, CascadeStudioApp.writeFile, CascadeStudioApp.downloadFile
     );
     window.threejsViewport = this.viewport;
+
+    // (Re)build the feature/sketch command bar inside the new viewport panel
+    if (this.sketchMode) { this.sketchMode.attachToViewport(); }
 
     // Wire timeline step changes to editor line highlighting
     this._historyDecorations = [];
