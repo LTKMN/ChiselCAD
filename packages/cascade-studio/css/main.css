@@ -592,3 +592,31 @@ body {
 .cs-dim-box input.cs-dim-bad {
   color: #ff7043;
 }
+/* --- Sketch mode: floating feedback (drifts up from the cursor and fades,
+       RCT-style) --- */
+.cs-float-msg {
+  position: absolute;
+  z-index: 40;
+  pointer-events: none;
+  font-family: var(--cs-font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+  padding: 3px 9px;
+  border-radius: var(--cs-radius);
+  background: rgba(17, 17, 17, 0.85);
+  animation: cs-float-up 3s ease-out forwards;
+}
+.cs-float-msg.bad {
+  color: #ff5252;
+  border: 1px solid rgba(255, 82, 82, 0.4);
+}
+.cs-float-msg.info {
+  color: var(--cs-accent);
+  border: 1px solid rgba(76, 175, 80, 0.35);
+}
+@keyframes cs-float-up {
+  0%   { opacity: 0; transform: translate(-50%, -100%) translateY(6px); }
+  8%   { opacity: 1; transform: translate(-50%, -100%) translateY(0); }
+  72%  { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -100%) translateY(-48px); }
+}

@@ -1,4 +1,24 @@
-MIT License
+ChiselCAD License
+
+ChiselCAD is a fork of CascadeStudio and combines two bodies of work under two
+sets of terms:
+
+  1. Original CascadeStudio code, Copyright (c) 2020 Johnathon Selstad, is and
+     remains licensed under the MIT License (reproduced in Part A below). That
+     grant is irrevocable and continues to apply to the original work and to
+     any portions of it that survive in this fork.
+
+  2. Modifications, additions, and new code written for ChiselCAD,
+     Copyright (c) 2026 Brennan (the "ChiselCAD Additions"), are licensed under
+     the Non-Commercial terms in Part B below.
+
+Where the two overlap, both notices must be preserved. If you wish to use the
+ChiselCAD Additions commercially, contact the copyright holder for a separate
+license.
+
+===============================================================================
+Part A — Original CascadeStudio code (MIT License)
+===============================================================================
 
 Copyright (c) 2020 Johnathon Selstad
 
@@ -19,3 +39,32 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+===============================================================================
+Part B — ChiselCAD Additions (Non-Commercial)
+===============================================================================
+
+Copyright (c) 2026 Brennan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+the ChiselCAD Additions (the "Additions") to use, copy, modify, merge, publish,
+and distribute the Additions, and to permit persons to whom the Additions are
+furnished to do so, subject to the following conditions:
+
+  1. Non-commercial use only. The Additions, in whole or in part, may not be
+     sold, offered for sale, sublicensed for a fee, or incorporated into any
+     product or service that is sold or otherwise commercialized, without the
+     prior written permission of the copyright holder. Personal, hobbyist,
+     educational, and research use is permitted.
+
+  2. The above copyright notice, this permission notice, and the ChiselCAD
+     License header shall be included in all copies or substantial portions of
+     the Additions.
+
+THE ADDITIONS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE ADDITIONS OR THE USE OR OTHER DEALINGS IN THE
+ADDITIONS.

@@ -3,6 +3,14 @@
 // The GUI is for creation; the emitted `new Sketch(...)` block is the artifact
 // the user edits afterward. Mouse-derived points snap to round numbers; values
 // typed into the dimension box are sacred and emitted exactly as given.
+//
+// Constraints: endpoints/centers are SHARED [x,y] arrays (coincidence is
+// topology, not a constraint). A small set of relations — anchor, horizontal,
+// vertical, parallel, perpendicular, equal, concentric, tangent — plus
+// persistent dimensions are kept satisfied by a lightweight relaxation solver
+// (sequential projection from current geometry). Anchored points never move;
+// an over-constrained sketch simply fails to converge and the offending
+// relation glyphs tint red. Emitted code still bakes the solved coordinates.
 
 import * as THREE from 'three';
 
@@ -40,7 +48,7 @@ const PLANES = {
 };
 
 const TOOLS = [
-  { id: 'select', icon: '➤', label: 'Select', hint: 'Click an element to select it • Delete removes it' },
+  { id: 'select', icon: '➤', label: 'Select', hint: 'Click selects (Shift adds) • drag moves • Del deletes • relation buttons below constrain the selection' },
   { id: 'line',   icon: '╱', label: 'Line',   hint: 'Click to chain lines • click the start point to close • Enter / right-click ends the chain' },
   { id: 'rect',   icon: '▭', label: 'Rect',   hint: 'Click two opposite corners' },
   { id: 'circle', icon: '◯', label: 'Circle', hint: 'Click the center, then a point on the circle' },
@@ -48,9 +56,33 @@ const TOOLS = [
   { id: 'dim',    icon: '↔', label: 'Dimension', hint: 'Click an element (then optionally a second) • type a value, or a name to create a variable' },
 ];
 
+// Relations the user can apply to the current selection. Keys work in the
+// Select tool while something is selected (they don't collide with the tool
+// shortcuts L/R/C/T/D).
+const RELATIONS = [
+  { id: 'anchor',     icon: '⚓', label: 'Anchor',     key: 'a', hint: 'Pin the selected point in place (or an element to pin its points). Click again to un-pin' },
+  { id: 'horizontal', icon: '━', label: 'Horiz',      key: 'h', hint: 'Make the selected line(s) horizontal' },
+  { id: 'vertical',   icon: '┃', label: 'Vert',       key: 'v', hint: 'Make the selected line(s) vertical' },
+  { id: 'parallel',   icon: '∥', label: 'Parallel',   key: 'p', hint: 'Make two selected lines parallel' },
+  { id: 'perp',       icon: '⊥', label: 'Perp',       key: 'x', hint: 'Make two selected lines perpendicular' },
+  { id: 'equal',      icon: '＝', label: 'Equal',      key: 'e', hint: 'Equal length (two lines) or equal radius (two circles/arcs)' },
+  { id: 'concentric', icon: '◎', label: 'Concentric', key: 'q', hint: 'Make two circles/arcs share a center' },
+  { id: 'tangent',    icon: '⌒', label: 'Tangent',    key: 'g', hint: 'Line ↔ circle or circle ↔ circle tangency' },
+];
+const RELATION_KEYS = Object.fromEntries(RELATIONS.map(r => [r.key, r.id]));
+
+const GLYPHS = {
+  anchor: '⚓', horizontal: 'H', vertical: 'V', parallel: '∥',
+  perp: '⊥', equal: '=', concentric: '◎', tangent: '⌒',
+};
+
 const COLOR_ENTITY = 0xe8e8e8;
 const COLOR_ACCENT = 0x4CAF50;
 const COLOR_REMOVE = 0xff7043;
+const GLYPH_REL = '#9e9e9e';   // relation glyphs — quiet gray
+const GLYPH_DIM = '#4CAF50';   // dimension values — accent
+const GLYPH_SEL = '#ffffff';   // selected glyph
+const GLYPH_BAD = '#ff5252';   // unsatisfiable (over-constrained)
 
 // ---------- small 2D helpers ----------
 const sub2 = (p, q) => [p[0] - q[0], p[1] - q[1]];
@@ -116,15 +148,25 @@ function angInArc(e, ang) {
   return d <= sweep + 1e-9;
 }
 
+/** Wrap an undirected-line angle difference into (-π/2, π/2]. */
+function wrapHalfPi(a) {
+  a = ((a % Math.PI) + Math.PI) % Math.PI;
+  return a > Math.PI / 2 ? a - Math.PI : a;
+}
+
+const lineAngle = (e) => Math.atan2(e.b[1] - e.a[1], e.b[0] - e.a[0]);
+
 class SketchMode {
   constructor(app) {
     this._app = app;
     this.active = false;
     this.plane = 'XY';
     this.entities = [];
-    this.variables = [];   // [{name, value}] created via the dimension box
+    this.points = [];      // [{id, p:[x,y]}] — shared endpoint/center arrays
+    this.constraints = []; // [{id, type, ...}] — relations + persistent dimensions
     this.tool = 'line';
     this._nextId = 1;
+    this._nextPtId = 1;
     this._undoStack = [];
 
     // In-progress tool state
@@ -135,8 +177,12 @@ class SketchMode {
     this._cursor = null;       // current snapped cursor position
     this._cursorSnapped = false;
     this._hoverTrim = null;    // {ent, ...piece} preview for the trim tool
-    this._selectedId = null;
+    this._sel = [];            // [{kind:'ent'|'pt'|'con', id}]
+    this._dragCand = null;     // pending/active drag in the select tool
     this._dim = null;          // {aId, bId|null, box, input, info}
+    this._glyphHits = [];      // constraint glyph hitboxes in sketch coords
+    this._texCache = new Map();
+    this._warnedUnsat = false;
 
     this._raycaster = new THREE.Raycaster();
     this._buildPlanePopover();
@@ -156,9 +202,12 @@ class SketchMode {
     this.active = true;
     this.plane = planeKey;
     this.entities = [];
-    this.variables = [];
+    this.points = [];
+    this.constraints = [];
     this._undoStack = [];
     this._nextId = 1;
+    this._nextPtId = 1;
+    this._warnedUnsat = false;
     this._resetToolState();
 
     const env = this._env;
@@ -179,12 +228,22 @@ class SketchMode {
 
     // Canvas + keyboard listeners
     const canvas = env.renderer.domElement;
+    // Re-render on zoom/pan so glyph sprites keep a constant pixel size
+    const zoomFn = () => {
+      if (this._zoomRaf) { return; }
+      this._zoomRaf = requestAnimationFrame(() => {
+        this._zoomRaf = 0;
+        if (this.active) { this._renderEntities(); }
+      });
+    };
     this._listeners = [
       [canvas, 'mousedown', (e) => this._onMouseDown(e)],
       [canvas, 'mousemove', (e) => this._onMouseMove(e)],
+      [canvas, 'mouseup', (e) => { if (e.button === 0) { this._finishDrag(); } }],
       [canvas, 'dblclick', (e) => { e.preventDefault(); this._endChain(); }],
       [canvas, 'contextmenu', (e) => this._onContextMenu(e)],
       [window, 'keydown', (e) => this._onKeyDown(e)],
+      [env.controls, 'change', zoomFn],
     ];
     this._listeners.forEach(([el, ev, fn]) => el.addEventListener(ev, fn));
     canvas.style.cursor = 'crosshair';
@@ -192,6 +251,7 @@ class SketchMode {
     // Swap the command bar to sketch tools
     this._featureRow.style.display = 'none';
     this._sketchRow.style.display = 'flex';
+    this._relRow.style.display = 'flex';
     this._hint.style.display = '';
     this._planeBadge.textContent = this.plane + ' · ' + this._def.label.split(' ')[0];
 
@@ -235,8 +295,12 @@ class SketchMode {
 
     // Swap the command bar back to feature buttons
     this._sketchRow.style.display = 'none';
+    this._relRow.style.display = 'none';
     this._featureRow.style.display = 'flex';
     this._hint.style.display = 'none';
+
+    for (const entry of this._texCache.values()) { entry.tex.dispose(); }
+    this._texCache.clear();
   }
 
   _resetToolState() {
@@ -245,7 +309,9 @@ class SketchMode {
     this._rectStart = null;
     this._circleCenter = null;
     this._hoverTrim = null;
-    this._selectedId = null;
+    this._sel = [];
+    this._dragCand = null;
+    this._glyphHits = [];
     this._closeDimBox();
   }
 
@@ -386,6 +452,32 @@ class SketchMode {
     cancel.addEventListener('click', () => this.end(false));
     sketchRow.appendChild(cancel);
 
+    // --- Relations row (visible while sketching) ---
+    const relRow = document.createElement('div');
+    relRow.className = 'cs-featbar-row';
+    relRow.style.display = 'none';
+    const relLabel = document.createElement('span');
+    relLabel.className = 'sketch-ribbon-plane';
+    relLabel.textContent = 'Relations';
+    relRow.appendChild(relLabel);
+    for (const rdef of RELATIONS) {
+      const b = document.createElement('button');
+      b.className = 'sketch-tool-btn';
+      b.type = 'button';
+      b.textContent = rdef.icon + ' ' + rdef.label;
+      b.title = rdef.hint + ' (' + rdef.key.toUpperCase() + ')';
+      b.addEventListener('click', () => {
+        if (this.tool !== 'select') {
+          this.setTool('select');
+          this._flashHintSketch('Select element(s), then click ' + rdef.label);
+        } else {
+          this._applyRelation(rdef.id);
+        }
+        b.blur();
+      });
+      relRow.appendChild(b);
+    }
+
     // --- Hint line ---
     this._hint = document.createElement('div');
     this._hint.className = 'cs-featbar-hint';
@@ -393,9 +485,11 @@ class SketchMode {
 
     bar.appendChild(featureRow);
     bar.appendChild(sketchRow);
+    bar.appendChild(relRow);
     bar.appendChild(this._hint);
     this._featureRow = featureRow;
     this._sketchRow = sketchRow;
+    this._relRow = relRow;
     this._bar = bar;
     this._vp.goldenContainer.element.appendChild(bar);
   }
@@ -408,6 +502,65 @@ class SketchMode {
     this._flashTimer = setTimeout(() => {
       if (!this.active) { this._hint.style.display = 'none'; }
     }, 3000);
+  }
+
+  /** Flash a message while sketching, then restore the current tool's hint. */
+  _flashHintSketch(msg) {
+    this._hint.textContent = msg;
+    clearTimeout(this._flashTimer);
+    this._flashTimer = setTimeout(() => {
+      if (!this.active) { return; }
+      const t = TOOLS.find(t => t.id === this.tool);
+      this._setHint(t ? t.hint : '');
+    }, 2500);
+  }
+
+  /** Float a message up from a point on screen, fading out as it rises.
+   *  kind: 'bad' (refusal, red) or 'info' (guidance, accent). clientPos
+   *  defaults to the last mouse position over the canvas. */
+  _floatMsg(text, kind, clientPos) {
+    const panel = this._vp && this._vp.goldenContainer.element;
+    if (!panel) { return; }
+    const pRect = panel.getBoundingClientRect();
+    const pos = clientPos || this._lastClient ||
+      [pRect.left + pRect.width / 2, pRect.top + pRect.height / 2];
+
+    const el = document.createElement('div');
+    el.className = 'cs-float-msg ' + (kind || 'bad');
+    el.textContent = text;
+    // Stagger rapid-fire messages so they don't stack on one spot
+    const now = performance.now();
+    this._floatStack = (now - (this._lastFloatT || 0) < 500) ? (this._floatStack || 0) + 1 : 0;
+    this._lastFloatT = now;
+    el.style.left = Math.max(8, Math.min(pRect.width - 8, pos[0] - pRect.left)) + 'px';
+    // Never spawn over the command bar (e.g. relation-button clicks) — start
+    // below it and drift up toward it instead
+    const barBottom = this._bar ? this._bar.offsetHeight : 0;
+    const raw = pos[1] - pRect.top - 16 - this._floatStack * 22;
+    // Under the bar, staggered messages step down instead of up
+    el.style.top = (raw >= barBottom + 34 ? raw : barBottom + 34 + this._floatStack * 22) + 'px';
+    panel.appendChild(el);
+    setTimeout(() => el.remove(), 3100);
+  }
+
+  /** Screen position of a constraint's geometry (for anchoring a float). */
+  _conClient(c) {
+    const env = this._env;
+    if (!env) { return null; }
+    let pt = null;
+    if (c.type === 'anchor') { pt = this._ptById(c.ptId); }
+    else {
+      const ent = c.entId !== undefined ? this._ent(c.entId)
+        : (c.aId !== undefined ? this._ent(c.aId) : null);
+      if (ent) { pt = this._entGlyphPos(ent).base; }
+    }
+    if (!pt) { return null; }
+    const v = this._def.toThree(pt[0], pt[1]).project(env.camera);
+    const rect = env.renderer.domElement.getBoundingClientRect();
+    return [
+      rect.left + (v.x + 1) / 2 * rect.width,
+      rect.top + (1 - (v.y + 1) / 2) * rect.height,
+    ];
   }
 
   // =====================================================================
@@ -641,7 +794,8 @@ class SketchMode {
     this._rectStart = null;
     this._circleCenter = null;
     this._hoverTrim = null;
-    this._selectedId = null;
+    this._sel = [];
+    this._dragCand = null;
     this._closeDimBox();
     this.tool = id;
     for (const [tid, b] of Object.entries(this._toolButtons)) {
@@ -790,22 +944,28 @@ class SketchMode {
   }
 
   /** Snap a raw point: existing endpoints/centers/origin first, else the grid.
-   *  Returns {pt, onPoint} — onPoint means an exact-coordinate snap was hit. */
-  _snap(raw, shiftKey) {
+   *  Returns {pt, onPoint} — onPoint means an exact-coordinate snap was hit.
+   *  Snapping to a registered point returns the SHARED array so the caller
+   *  reuses it (coincidence by topology). excludeArrs skips given refs
+   *  (used while dragging a point so it doesn't snap to itself). */
+  _snap(raw, shiftKey, excludeArrs) {
     const tol = this._pixelWorld(10);
-    const candidates = [[0, 0]];
+    const candidates = [{ p: [0, 0], ref: null }];
     for (const ent of this.entities) {
-      if (ent.type === 'line') { candidates.push(ent.a, ent.b); }
-      else if (ent.type === 'circle') { candidates.push(ent.c); }
-      else if (ent.type === 'arc') { candidates.push(ent.c, arcPt(ent, ent.a0), arcPt(ent, ent.a1)); }
+      if (ent.type === 'line') { candidates.push({ p: ent.a, ref: ent.a }, { p: ent.b, ref: ent.b }); }
+      else if (ent.type === 'circle') { candidates.push({ p: ent.c, ref: ent.c }); }
+      else if (ent.type === 'arc') {
+        candidates.push({ p: ent.c, ref: ent.c }, { p: arcPt(ent, ent.a0), ref: null }, { p: arcPt(ent, ent.a1), ref: null });
+      }
     }
-    if (this._chainStart) { candidates.push(this._chainStart); }
+    if (this._chainStart) { candidates.push({ p: this._chainStart, ref: this._chainStart }); }
     let best = null, bestD = tol;
     for (const c of candidates) {
-      const d = dist2(raw, c);
+      if (excludeArrs && c.ref && excludeArrs.has(c.ref)) { continue; }
+      const d = dist2(raw, c.p);
       if (d < bestD) { bestD = d; best = c; }
     }
-    if (best) { return { pt: [best[0], best[1]], onPoint: true }; }
+    if (best) { return { pt: best.ref || [best.p[0], best.p[1]], onPoint: true }; }
     const step = shiftKey ? 0.1 : 1; // Shift = fine snap
     return {
       pt: [Math.round(raw[0] / step) * step, Math.round(raw[1] / step) * step],
@@ -814,13 +974,602 @@ class SketchMode {
   }
 
   // =====================================================================
+  //  Shared points — endpoints/centers are shared [x,y] arrays, so moving
+  //  a corner moves every entity that touches it
+  // =====================================================================
+
+  /** Canonicalize a point: reuse a registered point within tolerance, else
+   *  register a copy. Points at the origin are auto-anchored. */
+  _canonPt(p) {
+    for (const r of this.points) {
+      if (r.p === p || dist2(r.p, p) < PT_EPS) { return r.p; }
+    }
+    const rec = { id: this._nextPtId++, p: [p[0], p[1]] };
+    this.points.push(rec);
+    if (samePt(rec.p, [0, 0])) {
+      this._addConstraint({ type: 'anchor', ptId: rec.id, at: [0, 0] });
+    }
+    return rec.p;
+  }
+
+  _ptRec(arr) { return this.points.find(r => r.p === arr) || null; }
+  _ptById(id) { const r = this.points.find(r => r.id === id); return r ? r.p : null; }
+  _ent(id) { return this.entities.find(e => e.id === id) || null; }
+  _entPts(e) { return e.type === 'line' ? [e.a, e.b] : [e.c]; }
+  _isAnchored(ptId) { return this.constraints.some(c => c.type === 'anchor' && c.ptId === ptId); }
+
+  /** Drop point records no entity references any more (and their anchors). */
+  _gcPoints() {
+    const used = new Set();
+    for (const e of this.entities) { for (const p of this._entPts(e)) { used.add(p); } }
+    const gone = new Set(this.points.filter(r => !used.has(r.p)).map(r => r.id));
+    if (gone.size === 0) { return; }
+    this.points = this.points.filter(r => !gone.has(r.id));
+    this.constraints = this.constraints.filter(c => !(c.type === 'anchor' && gone.has(c.ptId)));
+  }
+
+  // =====================================================================
+  //  Constraints — creation, lookup, deletion
+  // =====================================================================
+
+  /** True if adding this H/V constraint would contradict the other one. */
+  _hvConflict(c) {
+    if (c.type !== 'horizontal' && c.type !== 'vertical') { return false; }
+    const other = c.type === 'horizontal' ? 'vertical' : 'horizontal';
+    return this.constraints.some(k => k.type === other && k.entId === c.entId);
+  }
+
+  _findConstraint(c) {
+    return this.constraints.find(k => {
+      if (k.type !== c.type) { return false; }
+      if (c.type === 'anchor') { return k.ptId === c.ptId; }
+      if (c.entId !== undefined) { return k.entId === c.entId; }
+      return (k.aId === c.aId && k.bId === c.bId) || (k.aId === c.bId && k.bId === c.aId);
+    }) || null;
+  }
+
+  /** Add a constraint unless it already exists or contradicts. Returns it. */
+  _addConstraint(c) {
+    if (this._findConstraint(c) || this._hvConflict(c)) { return null; }
+    c.id = this._nextId++;
+    this.constraints.push(c);
+    return c;
+  }
+
+  /** Remove entities plus every constraint referencing them; GC points. */
+  _deleteEntities(ids) {
+    const gone = new Set(ids);
+    this.entities = this.entities.filter(e => !gone.has(e.id));
+    this.constraints = this.constraints.filter(c =>
+      !(gone.has(c.entId) || gone.has(c.aId) || gone.has(c.bId)));
+    this._gcPoints();
+  }
+
+  /** Auto-infer horizontal/vertical on a freshly drawn line. Mouse-derived
+   *  endpoints within ~5° get squared up; endpoints that landed on existing
+   *  geometry are never moved (only tagged when already exact). */
+  _inferLineRelation(ent, endpointFixed) {
+    const bShared = this.entities.some(e =>
+      e !== ent && this._entPts(e).includes(ent.b));
+    const fixed = endpointFixed || bShared;
+    const dx = ent.b[0] - ent.a[0], dy = ent.b[1] - ent.a[1];
+    if (Math.hypot(dx, dy) < 1) { return; }
+    const SLOPE = Math.tan(5 * Math.PI / 180);
+    if (Math.abs(dy) <= (fixed ? PT_EPS : SLOPE * Math.abs(dx))) {
+      if (!fixed) { ent.b[1] = ent.a[1]; }
+      this._addConstraint({ type: 'horizontal', entId: ent.id });
+    } else if (Math.abs(dx) <= (fixed ? PT_EPS : SLOPE * Math.abs(dy))) {
+      if (!fixed) { ent.b[0] = ent.a[0]; }
+      this._addConstraint({ type: 'vertical', entId: ent.id });
+    }
+  }
+
+  /** Apply a relation button/key to the current selection. */
+  _applyRelation(id) {
+    const ents = this._sel.filter(s => s.kind === 'ent').map(s => this._ent(s.id)).filter(Boolean);
+    const pts = this._sel.filter(s => s.kind === 'pt')
+      .map(s => this.points.find(r => r.id === s.id)).filter(Boolean);
+    const lines = ents.filter(e => e.type === 'line');
+    const circs = ents.filter(e => e.type === 'circle' || e.type === 'arc');
+    const need = (msg) => { this._flashHintSketch(msg); this._floatMsg(msg, 'info'); };
+    const toAdd = [];
+
+    if (id === 'anchor') {
+      const targets = [...pts];
+      for (const e of ents) {
+        for (const p of this._entPts(e)) {
+          const r = this._ptRec(p);
+          if (r && !targets.includes(r)) { targets.push(r); }
+        }
+      }
+      if (!targets.length) { return need('Anchor: select a point (or an element to pin its points)'); }
+      this._pushUndo();
+      if (targets.every(r => this._isAnchored(r.id))) {
+        const ids = new Set(targets.map(r => r.id));
+        this.constraints = this.constraints.filter(c => !(c.type === 'anchor' && ids.has(c.ptId)));
+        this._floatMsg('⚓ removed', 'info');
+      } else {
+        for (const r of targets) {
+          this._addConstraint({ type: 'anchor', ptId: r.id, at: [r.p[0], r.p[1]] });
+        }
+      }
+    } else if (id === 'horizontal' || id === 'vertical') {
+      if (!lines.length) { return need('Select a line first'); }
+      for (const l of lines) { toAdd.push({ type: id, entId: l.id }); }
+    } else if (id === 'parallel' || id === 'perp') {
+      if (lines.length !== 2) { return need((id === 'perp' ? 'Perpendicular' : 'Parallel') + ' needs two lines — Shift-click the second one'); }
+      toAdd.push({ type: id, aId: lines[0].id, bId: lines[1].id });
+    } else if (id === 'equal') {
+      if (lines.length === 2 && !circs.length) { toAdd.push({ type: 'equal', aId: lines[0].id, bId: lines[1].id }); }
+      else if (circs.length === 2 && !lines.length) { toAdd.push({ type: 'equal', aId: circs[0].id, bId: circs[1].id }); }
+      else { return need('Equal needs two lines, or two circles/arcs'); }
+    } else if (id === 'concentric') {
+      if (circs.length !== 2) { return need('Concentric needs two circles/arcs'); }
+      toAdd.push({ type: 'concentric', aId: circs[0].id, bId: circs[1].id });
+    } else if (id === 'tangent') {
+      if (lines.length === 1 && circs.length === 1) {
+        toAdd.push({ type: 'tangent', aId: lines[0].id, bId: circs[0].id });
+      } else if (circs.length === 2 && !lines.length) {
+        const d = dist2(circs[0].c, circs[1].c);
+        const internal = Math.abs(d - Math.abs(circs[0].r - circs[1].r)) < Math.abs(d - (circs[0].r + circs[1].r));
+        toAdd.push({ type: 'tangent', aId: circs[0].id, bId: circs[1].id, internal });
+      } else { return need('Tangent needs a line + a circle, or two circles'); }
+    }
+
+    if (toAdd.length) {
+      const fresh = toAdd.filter(c => !this._findConstraint(c));
+      if (!fresh.length) { return need('Already related'); }
+      const conflict = fresh.find(c => this._hvConflict(c));
+      if (conflict) {
+        return need('That line is already ' + (conflict.type === 'horizontal' ? 'vertical' : 'horizontal') + ' — delete that relation first');
+      }
+      const hadBad = this.constraints.some(k => k.unsat);
+      this._pushUndo();
+      for (const c of fresh) { this._addConstraint(c); }
+      if (!this._solveQuiet() && !hadBad) {
+        this._rejectEdit(fresh);
+        return;
+      }
+    } else {
+      this._solveQuiet();
+    }
+    this._renderEntities();
+    this._renderPreview();
+  }
+
+  // =====================================================================
+  //  Solver — sequential projection (PBD-style). Each pass nudges the
+  //  geometry toward satisfying every constraint; anchored and dragged
+  //  points never move. Runs from current geometry, so the result is
+  //  always "the nearest shape that fits".
+  // =====================================================================
+
+  /** Solve in place. extraLocked: Set of point arrays pinned by a drag.
+   *  Returns true when everything converged. */
+  _solve(extraLocked) {
+    const locked = new Set(extraLocked || []);
+    for (const c of this.constraints) {
+      if (c.type !== 'anchor') { continue; }
+      const p = this._ptById(c.ptId);
+      if (p && !locked.has(p)) { p[0] = c.at[0]; p[1] = c.at[1]; locked.add(p); }
+    }
+    const w = (p) => (locked.has(p) ? 0 : 1);
+
+    // Iterate in batches, continuing while the worst residual still improves:
+    // stiff-but-feasible chains converge slowly but surely, while a genuine
+    // conflict plateaus and stops early. Sketch sizes make this cheap.
+    const TOL = 0.01, BATCH = 150, MAX_BATCHES = 8;
+    let prevWorst = Infinity;
+    for (let b = 0; b < MAX_BATCHES; b++) {
+      let fixedPoint = false;
+      for (let i = 0; i < BATCH; i++) {
+        const before = this.points.map(r => [r.p[0], r.p[1]]);
+        const radiiBefore = this.entities.map(e => e.r || 0);
+        for (const c of this.constraints) { this._project(c, w); }
+        let maxMove = 0;
+        this.points.forEach((r, j) => {
+          maxMove = Math.max(maxMove, Math.abs(r.p[0] - before[j][0]), Math.abs(r.p[1] - before[j][1]));
+        });
+        this.entities.forEach((e, j) => {
+          maxMove = Math.max(maxMove, Math.abs((e.r || 0) - radiiBefore[j]));
+        });
+        if (maxMove < 1e-10) { fixedPoint = true; break; }
+      }
+      let worst = 0;
+      for (const c of this.constraints) { worst = Math.max(worst, this._residual(c)); }
+      if (fixedPoint || worst < TOL * 0.2 || worst > prevWorst * 0.7) { break; }
+      prevWorst = worst;
+    }
+
+    let anyBad = false;
+    for (const c of this.constraints) {
+      c.unsat = this._residual(c) > 0.01;
+      anyBad = anyBad || c.unsat;
+    }
+    if (anyBad && !this._warnedUnsat && !this._quietSolve) {
+      this._flashHintSketch('Over-constrained — the red relations can\'t all hold (delete one, or remove an anchor)');
+    }
+    this._warnedUnsat = anyBad;
+    return !anyBad;
+  }
+
+  /** Move p and q along their connecting line until they are d apart. */
+  _projDist(p, q, d, w) {
+    const wp = w(p), wq = w(q), tot = wp + wq;
+    if (!tot) { return; }
+    let dx = q[0] - p[0], dy = q[1] - p[1];
+    let L = Math.hypot(dx, dy);
+    if (L < 1e-12) {
+      if (d < 1e-12) { return; }
+      dx = 1; dy = 0; L = 1;
+    }
+    const err = L - d;
+    const ux = dx / L, uy = dy / L;
+    p[0] += ux * err * wp / tot; p[1] += uy * err * wp / tot;
+    q[0] -= ux * err * wq / tot; q[1] -= uy * err * wq / tot;
+  }
+
+  /** Rotate a line by dAng about its most constrained pivot. */
+  _rotateToward(e, dAng, w) {
+    if (Math.abs(dAng) < 1e-12) { return; }
+    const wa = w(e.a), wb = w(e.b);
+    if (!wa && !wb) { return; }
+    let pivot;
+    if (!wa) { pivot = e.a; }
+    else if (!wb) { pivot = e.b; }
+    else { pivot = [(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2]; }
+    const cs = Math.cos(dAng), sn = Math.sin(dAng);
+    const rot = (p) => {
+      const dx = p[0] - pivot[0], dy = p[1] - pivot[1];
+      p[0] = pivot[0] + dx * cs - dy * sn;
+      p[1] = pivot[1] + dx * sn + dy * cs;
+    };
+    if (wa) { rot(e.a); }
+    if (wb) { rot(e.b); }
+  }
+
+  _lineMobility(e, w) { return (w(e.a) || w(e.b)) ? 1 : 0; }
+
+  /** Stretch/shrink a line to length L, favoring its free endpoint(s). */
+  _setLineLen(e, L, w) {
+    const cur = dist2(e.a, e.b);
+    if (cur < 1e-12 || Math.abs(cur - L) < 1e-12) { return; }
+    const wa = w(e.a), wb = w(e.b), tot = wa + wb;
+    if (!tot) { return; }
+    const ux = (e.b[0] - e.a[0]) / cur, uy = (e.b[1] - e.a[1]) / cur;
+    const d = L - cur;
+    e.b[0] += ux * d * wb / tot; e.b[1] += uy * d * wb / tot;
+    e.a[0] -= ux * d * wa / tot; e.a[1] -= uy * d * wa / tot;
+  }
+
+  /** Value of a length/radius dimension on this entity, or null. */
+  _dimValueFor(entId, type) {
+    const c = this.constraints.find(k => k.type === type && k.entId === entId);
+    return c ? c.value : null;
+  }
+
+  /** Current distance + measuring direction between two entities (pair dim).
+   *  mode is decided ONCE when the dimension is created ('perp' for parallel
+   *  lines, else 'center') and stays fixed — re-deciding it mid-solve from
+   *  nearly-parallel geometry makes the target flip-flop and never converge. */
+  _pairDistGeom(A, B, mode) {
+    const mid = (e) => e.type === 'line' ? lerp2(e.a, e.b, 0.5) : e.c;
+    const usePerp = A.type === 'line' && B.type === 'line' && (
+      mode === 'perp' ||
+      (mode === undefined &&
+        Math.abs(cross2(sub2(A.b, A.a), sub2(B.b, B.a))) < 1e-6 * len2(sub2(A.b, A.a)) * len2(sub2(B.b, B.a)))
+    );
+    if (usePerp) {
+      const u = sub2(A.b, A.a);
+      const L = len2(u);
+      if (L > 1e-12) {
+        const nu = [-u[1] / L, u[0] / L];
+        const d = dot2(sub2(mid(B), mid(A)), nu);
+        return { d: Math.abs(d), dir: d >= 0 ? nu : scale2(nu, -1) };
+      }
+    }
+    if (mode === 'perp') { return null; } // degenerate line
+    const delta = sub2(mid(B), mid(A));
+    const d = len2(delta);
+    if (d < 1e-9) { return null; }
+    return { d, dir: scale2(delta, 1 / d) };
+  }
+
+  _project(c, w) {
+    switch (c.type) {
+      case 'anchor': return; // enforced by the locked set
+      case 'horizontal':
+      case 'vertical': {
+        const e = this._ent(c.entId);
+        if (!e) { return; }
+        const target = c.type === 'horizontal' ? 0 : Math.PI / 2;
+        this._rotateToward(e, wrapHalfPi(target - lineAngle(e)), w);
+        return;
+      }
+      case 'parallel':
+      case 'perp': {
+        const A = this._ent(c.aId), B = this._ent(c.bId);
+        if (!A || !B) { return; }
+        const off = c.type === 'perp' ? Math.PI / 2 : 0;
+        const err = wrapHalfPi(lineAngle(B) - lineAngle(A) - off);
+        const mA = this._lineMobility(A, w), mB = this._lineMobility(B, w);
+        const tot = mA + mB;
+        if (!tot) { return; }
+        this._rotateToward(A, err * (mA / tot), w);
+        this._rotateToward(B, -err * (mB / tot), w);
+        return;
+      }
+      case 'equal': {
+        const A = this._ent(c.aId), B = this._ent(c.bId);
+        if (!A || !B) { return; }
+        if (A.type === 'line' && B.type === 'line') {
+          const dimA = this._dimValueFor(A.id, 'length'), dimB = this._dimValueFor(B.id, 'length');
+          const t = dimA !== null ? dimA
+            : dimB !== null ? dimB
+            : (dist2(A.a, A.b) + dist2(B.a, B.b)) / 2;
+          this._setLineLen(A, t, w);
+          this._setLineLen(B, t, w);
+        } else if (A.type !== 'line' && B.type !== 'line') {
+          const dimA = this._dimValueFor(A.id, 'radius'), dimB = this._dimValueFor(B.id, 'radius');
+          const t = dimA !== null ? dimA : dimB !== null ? dimB : (A.r + B.r) / 2;
+          A.r = t; B.r = t;
+        }
+        return;
+      }
+      case 'concentric': {
+        const A = this._ent(c.aId), B = this._ent(c.bId);
+        if (!A || !B) { return; }
+        this._projDist(A.c, B.c, 0, w);
+        return;
+      }
+      case 'tangent': {
+        const A = this._ent(c.aId), B = this._ent(c.bId);
+        if (!A || !B) { return; }
+        const line = A.type === 'line' ? A : (B.type === 'line' ? B : null);
+        if (line) {
+          const circ = A === line ? B : A;
+          const dx = line.b[0] - line.a[0], dy = line.b[1] - line.a[1];
+          const L = Math.hypot(dx, dy);
+          if (L < 1e-12) { return; }
+          const nx = -dy / L, ny = dx / L;
+          const d = (circ.c[0] - line.a[0]) * nx + (circ.c[1] - line.a[1]) * ny;
+          const s = d >= 0 ? 1 : -1;
+          const err = d - s * circ.r;
+          const wc = w(circ.c), wa = w(line.a), wb = w(line.b);
+          const mL = (wa && wb) ? 1 : ((wa || wb) ? 0.5 : 0);
+          const tot = wc + mL;
+          if (!tot) {
+            // Everything pinned — let the radius absorb it unless dimensioned
+            if (this._dimValueFor(circ.id, 'radius') === null) { circ.r = Math.abs(d); }
+            return;
+          }
+          const dc = err * (wc / tot), dl = mL ? err * (mL / tot) : 0;
+          circ.c[0] -= nx * dc; circ.c[1] -= ny * dc;
+          if (wa) { line.a[0] += nx * dl; line.a[1] += ny * dl; }
+          if (wb) { line.b[0] += nx * dl; line.b[1] += ny * dl; }
+        } else {
+          const target = c.internal ? Math.abs(A.r - B.r) : A.r + B.r;
+          this._projDist(A.c, B.c, target, w);
+        }
+        return;
+      }
+      case 'length': {
+        const e = this._ent(c.entId);
+        if (e) { this._projDist(e.a, e.b, c.value, w); }
+        return;
+      }
+      case 'radius': {
+        const e = this._ent(c.entId);
+        if (e) { e.r = c.value; }
+        return;
+      }
+      case 'dist': {
+        const A = this._ent(c.aId), B = this._ent(c.bId);
+        if (!A || !B) { return; }
+        const g = this._pairDistGeom(A, B, c.mode);
+        if (!g) { return; }
+        const err = g.d - c.value;
+        const ptsA = this._entPts(A).filter(p => w(p));
+        const ptsB = this._entPts(B).filter(p => w(p));
+        const mA = ptsA.length ? 1 : 0, mB = ptsB.length ? 1 : 0;
+        const tot = mA + mB;
+        if (!tot) { return; }
+        const [ux, uy] = g.dir;
+        for (const p of ptsA) { p[0] += ux * err * (mA / tot); p[1] += uy * err * (mA / tot); }
+        for (const p of ptsB) { p[0] -= ux * err * (mB / tot); p[1] -= uy * err * (mB / tot); }
+        return;
+      }
+    }
+  }
+
+  /** How far a constraint is from satisfied, in sketch units. */
+  _residual(c) {
+    const e1 = c.entId !== undefined ? this._ent(c.entId) : null;
+    const A = c.aId !== undefined ? this._ent(c.aId) : null;
+    const B = c.bId !== undefined ? this._ent(c.bId) : null;
+    switch (c.type) {
+      case 'anchor': { const p = this._ptById(c.ptId); return p ? dist2(p, c.at) : 0; }
+      case 'horizontal': return e1 ? Math.abs(e1.b[1] - e1.a[1]) : 0;
+      case 'vertical': return e1 ? Math.abs(e1.b[0] - e1.a[0]) : 0;
+      case 'parallel':
+      case 'perp': {
+        if (!A || !B) { return 0; }
+        const off = c.type === 'perp' ? Math.PI / 2 : 0;
+        const err = Math.abs(wrapHalfPi(lineAngle(B) - lineAngle(A) - off));
+        return err * Math.min(dist2(A.a, A.b), dist2(B.a, B.b)) * 0.5;
+      }
+      case 'equal': {
+        if (!A || !B) { return 0; }
+        return A.type === 'line'
+          ? Math.abs(dist2(A.a, A.b) - dist2(B.a, B.b))
+          : Math.abs(A.r - B.r);
+      }
+      case 'concentric': return (A && B) ? dist2(A.c, B.c) : 0;
+      case 'tangent': {
+        if (!A || !B) { return 0; }
+        const line = A.type === 'line' ? A : (B.type === 'line' ? B : null);
+        if (line) {
+          const circ = A === line ? B : A;
+          const dx = line.b[0] - line.a[0], dy = line.b[1] - line.a[1];
+          const L = Math.hypot(dx, dy);
+          if (L < 1e-12) { return 0; }
+          const d = ((circ.c[0] - line.a[0]) * -dy + (circ.c[1] - line.a[1]) * dx) / L;
+          return Math.abs(Math.abs(d) - circ.r);
+        }
+        const target = c.internal ? Math.abs(A.r - B.r) : A.r + B.r;
+        return Math.abs(dist2(A.c, B.c) - target);
+      }
+      case 'length': return e1 ? Math.abs(dist2(e1.a, e1.b) - c.value) : 0;
+      case 'radius': return e1 ? Math.abs(e1.r - c.value) : 0;
+      case 'dist': {
+        if (!A || !B) { return 0; }
+        const g = this._pairDistGeom(A, B, c.mode);
+        return g ? Math.abs(g.d - c.value) : 0;
+      }
+    }
+    return 0;
+  }
+
+  _solveQuiet(extraLocked) {
+    this._quietSolve = true;
+    const ok = this._solve(extraLocked);
+    this._quietSolve = false;
+    return ok;
+  }
+
+  /** Current geometric value of a dimension constraint. */
+  _conMeasure(c) {
+    const e = c.entId !== undefined ? this._ent(c.entId) : null;
+    if (c.type === 'length') { return e ? dist2(e.a, e.b) : null; }
+    if (c.type === 'radius') { return e ? e.r : null; }
+    if (c.type === 'dist') {
+      const A = this._ent(c.aId), B = this._ent(c.bId);
+      const g = (A && B) ? this._pairDistGeom(A, B, c.mode) : null;
+      return g ? g.d : null;
+    }
+    return null;
+  }
+
+  /** Short "what's fighting it" phrase: constraints sharing geometry with c. */
+  _blockerPhrase(c) {
+    const entIds = new Set();
+    if (c.entId !== undefined) { entIds.add(c.entId); }
+    if (c.aId !== undefined) { entIds.add(c.aId); entIds.add(c.bId); }
+    const pts = new Set();
+    for (const id of entIds) {
+      const e = this._ent(id);
+      if (e) { for (const p of this._entPts(e)) { pts.add(p); } }
+    }
+    const names = [];
+    const push = (n) => { if (!names.includes(n)) { names.push(n); } };
+    for (const k of this.constraints) {
+      if (k === c || k.id === c.id) { continue; }
+      if (k.type === 'anchor') {
+        const p = this._ptById(k.ptId);
+        if (p && pts.has(p)) { push('anchors'); }
+        continue;
+      }
+      const kEnts = [k.entId, k.aId, k.bId].filter(x => x !== undefined);
+      let touches = kEnts.some(id => entIds.has(id));
+      if (!touches) {
+        for (const id of kEnts) {
+          const e = this._ent(id);
+          if (e && this._entPts(e).some(p => pts.has(p))) { touches = true; break; }
+        }
+      }
+      if (!touches) { continue; }
+      if (k.type === 'length' || k.type === 'radius' || k.type === 'dist') { push('dimensions'); }
+      else if (k.type === 'horizontal' || k.type === 'vertical') { push('H/V relations'); }
+      else { push(k.type + ' relations'); }
+    }
+    return names.length ? 'held by ' + names.slice(0, 3).join(' + ') : '';
+  }
+
+  /** A just-applied edit (new dimension value or relation) can't be
+   *  satisfied. Find the nearest feasible value, revert the edit (popping
+   *  the undo state pushed by the caller), and float an explanation at the
+   *  geometry that refused. */
+  _rejectEdit(cons, clientPos) {
+    this._quietSolve = true;
+    // Re-solve with the new constraints projected FIRST, so everything else
+    // wins each pass: geometry settles at the nearest feasible state, and a
+    // dimension's measure then reads out its actual limit.
+    for (const c of cons) {
+      const i = this.constraints.indexOf(c);
+      if (i > 0) { this.constraints.splice(i, 1); this.constraints.unshift(c); }
+    }
+    this._solve();
+    const c0 = cons[0];
+    const achieved = this._conMeasure(c0);
+    const blockers = this._blockerPhrase(c0);
+
+    const WORDS = {
+      length: ['this line', 'longer', 'shorter'],
+      radius: ['this radius', 'bigger', 'smaller'],
+      dist: ['this distance', 'more', 'less'],
+    };
+    // Would the boundary value itself hold? If even that fails, the value is
+    // fully determined by the rest of the sketch — say so instead of quoting
+    // a longer/shorter bound that also wouldn't work.
+    let fullyDetermined = false;
+    if (WORDS[c0.type] && achieved !== null) {
+      const tryVal = c0.value;
+      c0.value = achieved;
+      fullyDetermined = !this._solve();
+      c0.value = tryVal;
+    }
+
+    const snap = this._undoStack.pop();
+    if (snap) { this._restoreState(snap); }
+    this._solve(); // recompute unsat flags on the restored state
+    this._quietSolve = false;
+
+    // Round quoted bounds TOWARD the feasible side so typing the shown
+    // number always works. dir: -1 floor (upper bound), +1 ceil (lower), 0 round
+    const fmt2 = (n, dir) => {
+      const s = dir > 0 ? Math.ceil(n * 100 - 1e-7) : dir < 0 ? Math.floor(n * 100 + 1e-7) : Math.round(n * 100);
+      return String(s / 100);
+    };
+    let msg;
+    if (WORDS[c0.type]) {
+      const [noun, over, under] = WORDS[c0.type];
+      if (fullyDetermined) {
+        msg = `${noun} is fixed at ${fmt2(achieved, 0)} by its other relations`;
+      } else if (achieved !== null && Math.abs(achieved - c0.value) > 0.005) {
+        msg = c0.value > achieved
+          ? `${noun} can't be ${over} than ${fmt2(achieved, -1)} here`
+          : `${noun} can't be ${under} than ${fmt2(achieved, 1)} here`;
+      } else {
+        msg = `${noun} can't be ${fmt(c0.value)} and keep its relations`;
+      }
+    } else {
+      const r = RELATIONS.find(r => r.id === c0.type);
+      msg = `${r ? r.icon + ' ' + r.label : c0.type} can't hold here`;
+    }
+    if (blockers) { msg += ' — ' + blockers; }
+    this._floatMsg(msg, 'bad', clientPos || this._conClient(c0));
+    this._renderEntities();
+    this._renderPreview();
+  }
+
+  // =====================================================================
   //  Mouse handlers
   // =====================================================================
 
   _onMouseMove(e) {
     if (!this.active) { return; }
+    this._lastClient = [e.clientX, e.clientY];
     const raw = this._eventToSketchRaw(e);
     if (!raw) { return; }
+
+    if (this.tool === 'select' && this._dragCand) {
+      if (!(e.buttons & 1)) { this._finishDrag(); }
+      else if (this._dragCand.moved || dist2(raw, this._dragCand.start) > this._pixelWorld(4)) {
+        this._dragBy(raw, e.shiftKey);
+        return;
+      }
+    }
+
     const snap = this._snap(raw, e.shiftKey);
     this._cursor = snap.pt;
     this._cursorSnapped = snap.onPoint;
@@ -831,8 +1580,162 @@ class SketchMode {
     this._renderPreview();
   }
 
+  // =====================================================================
+  //  Select-tool interaction: selection, dragging (live solve), glyphs
+  // =====================================================================
+
+  _updateSel(item, add) {
+    const idx = this._sel.findIndex(s => s.kind === item.kind && s.id === item.id);
+    if (add) {
+      if (idx >= 0) { this._sel.splice(idx, 1); } else { this._sel.push(item); }
+    } else if (idx < 0) {
+      this._sel = [item];
+    }
+    // clicking an already-selected item without Shift keeps the selection
+    // (so a multi-selection can be dragged)
+  }
+
+  /** Nearest registered point within pixel tolerance. */
+  _pointAt(raw) {
+    const tol = this._pixelWorld(8);
+    let best = null, bestD = tol;
+    for (const r of this.points) {
+      const d = dist2(raw, r.p);
+      if (d < bestD) { bestD = d; best = r; }
+    }
+    return best;
+  }
+
+  /** Constraint glyph under the cursor, if any (topmost first). */
+  _glyphAt(raw) {
+    for (let i = this._glyphHits.length - 1; i >= 0; i--) {
+      const g = this._glyphHits[i];
+      if (Math.abs(raw[0] - g.x) <= g.hw && Math.abs(raw[1] - g.y) <= g.hh) { return g; }
+    }
+    return null;
+  }
+
+  _onSelectDown(e, raw) {
+    const g = this._glyphAt(raw);
+    if (g) {
+      this._sel = [{ kind: 'con', id: g.conId }];
+      this._renderEntities();
+      const con = this.constraints.find(k => k.id === g.conId);
+      if (con && (con.type === 'length' || con.type === 'radius' || con.type === 'dist')) {
+        this._openDimBoxForCon(e, con);
+      }
+      return;
+    }
+    const pRec = this._pointAt(raw);
+    if (pRec) {
+      this._updateSel({ kind: 'pt', id: pRec.id }, e.shiftKey);
+      this._dragCand = { kind: 'pt', id: pRec.id, start: raw, moved: false };
+      this._renderEntities();
+      return;
+    }
+    const hit = this._hitEntity(raw);
+    if (hit) {
+      this._updateSel({ kind: 'ent', id: hit.ent.id }, e.shiftKey);
+      this._dragCand = { kind: 'ent', id: hit.ent.id, start: raw, moved: false };
+      this._renderEntities();
+      return;
+    }
+    if (!e.shiftKey && this._sel.length) {
+      this._sel = [];
+      this._renderEntities();
+    }
+  }
+
+  _dragBy(raw, shiftKey) {
+    const cand = this._dragCand;
+    if (!cand.moved) {
+      if (cand.kind === 'pt') {
+        const rec = this.points.find(r => r.id === cand.id);
+        if (!rec) { this._dragCand = null; return; }
+        if (this._isAnchored(rec.id)) {
+          this._flashHintSketch('That point is anchored — delete its ⚓ to move it');
+          this._floatMsg('⚓ anchored — Del its anchor to move it', 'info');
+          this._dragCand = null;
+          return;
+        }
+        cand.pts = [rec.p];
+      } else {
+        const ent = this._ent(cand.id);
+        if (!ent) { this._dragCand = null; return; }
+        const pts = this._entPts(ent).filter(p => {
+          const r = this._ptRec(p);
+          return !(r && this._isAnchored(r.id));
+        });
+        if (!pts.length) {
+          this._flashHintSketch('That element is fully anchored — delete its ⚓ to move it');
+          this._floatMsg('⚓ anchored — Del its anchors to move it', 'info');
+          this._dragCand = null;
+          return;
+        }
+        cand.pts = pts;
+      }
+      cand.base = cand.pts.map(p => [p[0], p[1]]);
+      this._pushUndo();
+      cand.moved = true;
+    }
+
+    if (cand.kind === 'pt') {
+      const snap = this._snap(raw, shiftKey, new Set(cand.pts));
+      cand.pts[0][0] = snap.pt[0];
+      cand.pts[0][1] = snap.pt[1];
+      this._cursor = cand.pts[0];
+      this._cursorSnapped = snap.onPoint;
+    } else {
+      const step = shiftKey ? 0.1 : 1;
+      const dx = Math.round((raw[0] - cand.start[0]) / step) * step;
+      const dy = Math.round((raw[1] - cand.start[1]) / step) * step;
+      cand.pts.forEach((p, i) => {
+        p[0] = cand.base[i][0] + dx;
+        p[1] = cand.base[i][1] + dy;
+      });
+    }
+    this._solve(new Set(cand.pts));
+    this._renderEntities();
+    this._renderPreview();
+  }
+
+  _finishDrag() {
+    const cand = this._dragCand;
+    this._dragCand = null;
+    if (!cand || !cand.moved) { return; }
+    if (cand.kind === 'pt') { this._mergeCoincident(cand.pts[0]); }
+    this._solve();
+    this._renderEntities();
+    this._renderPreview();
+  }
+
+  /** After dragging a point onto another point, fuse them (topological
+   *  coincidence) — unless that would collapse a line to zero length. */
+  _mergeCoincident(arr) {
+    const rec = this._ptRec(arr);
+    if (!rec) { return; }
+    const other = this.points.find(r => r !== rec && dist2(r.p, arr) < PT_EPS);
+    if (!other) { return; }
+    const collapses = this.entities.some(e => e.type === 'line' &&
+      ((e.a === arr && e.b === other.p) || (e.b === arr && e.a === other.p)));
+    if (collapses) { return; }
+    for (const e of this.entities) {
+      if (e.a === arr) { e.a = other.p; }
+      if (e.b === arr) { e.b = other.p; }
+      if (e.c === arr) { e.c = other.p; }
+    }
+    const anchor = this.constraints.find(k => k.type === 'anchor' && k.ptId === rec.id);
+    if (anchor) {
+      if (this._isAnchored(other.id)) { this.constraints = this.constraints.filter(k => k !== anchor); }
+      else { anchor.ptId = other.id; anchor.at = [other.p[0], other.p[1]]; }
+    }
+    this.points = this.points.filter(r => r !== rec);
+    this._sel = this._sel.filter(s => !(s.kind === 'pt' && s.id === rec.id));
+  }
+
   _onMouseDown(e) {
     if (!this.active || e.button !== 0) { return; }
+    this._lastClient = [e.clientX, e.clientY];
     const raw = this._eventToSketchRaw(e);
     if (!raw) { return; }
     const snap = this._snap(raw, e.shiftKey);
@@ -846,11 +1749,16 @@ class SketchMode {
         } else {
           if (samePt(pt, this._chainPrev)) { break; } // ignore zero-length
           this._pushUndo();
-          this.entities.push({ id: this._nextId++, type: 'line', a: this._chainPrev, b: pt });
-          if (this._chainStart && samePt(pt, this._chainStart)) {
+          const closes = this._chainStart && samePt(pt, this._chainStart);
+          const a = this._canonPt(this._chainPrev);
+          const b = this._canonPt(pt);
+          const ent = { id: this._nextId++, type: 'line', a, b };
+          this.entities.push(ent);
+          this._inferLineRelation(ent, snap.onPoint || closes);
+          if (closes) {
             this._endChain(); // closed the loop
           } else {
-            this._chainPrev = pt;
+            this._chainPrev = b;
           }
           this._renderEntities();
         }
@@ -863,9 +1771,11 @@ class SketchMode {
           const [x1, y1] = this._rectStart, [x2, y2] = pt;
           if (Math.abs(x2 - x1) > PT_EPS && Math.abs(y2 - y1) > PT_EPS) {
             this._pushUndo();
-            const c = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]];
+            const c = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]].map(p => this._canonPt(p));
             for (let i = 0; i < 4; i++) {
-              this.entities.push({ id: this._nextId++, type: 'line', a: c[i], b: c[(i + 1) % 4] });
+              const ent = { id: this._nextId++, type: 'line', a: c[i], b: c[(i + 1) % 4] };
+              this.entities.push(ent);
+              this._addConstraint({ type: i % 2 === 0 ? 'horizontal' : 'vertical', entId: ent.id });
             }
             this._rectStart = null;
             this._renderEntities();
@@ -883,7 +1793,7 @@ class SketchMode {
           if (!snap.onPoint) { r = Math.round(r / (e.shiftKey ? 0.1 : 1)) * (e.shiftKey ? 0.1 : 1); }
           if (r > PT_EPS) {
             this._pushUndo();
-            this.entities.push({ id: this._nextId++, type: 'circle', c: this._circleCenter, r: r });
+            this.entities.push({ id: this._nextId++, type: 'circle', c: this._canonPt(this._circleCenter), r: r });
             this._circleCenter = null;
             this._renderEntities();
           }
@@ -905,9 +1815,7 @@ class SketchMode {
         break;
       }
       case 'select': {
-        const hit = this._hitEntity(raw);
-        this._selectedId = hit ? hit.ent.id : null;
-        this._renderEntities();
+        this._onSelectDown(e, raw);
         break;
       }
     }
@@ -928,11 +1836,18 @@ class SketchMode {
     if (e.target && ((e.target.tagName === 'INPUT') || (e.target.closest && e.target.closest('.monaco-editor')))) { return; }
 
     if (e.key === 'Escape') {
-      if (this._dim) { this._closeDimBox(); }
+      if (this._dragCand) {
+        const moved = this._dragCand.moved;
+        this._dragCand = null;
+        if (moved) { this._undo(); }
+      } else if (this._dim) { this._closeDimBox(); }
       else if (this._chainPrev || this._rectStart || this._circleCenter) {
         this._endChain();
         this._rectStart = null;
         this._circleCenter = null;
+      } else if (this._sel.length) {
+        this._sel = [];
+        this._renderEntities();
       } else if (this.tool !== 'select') {
         this.setTool('select');
       }
@@ -940,16 +1855,30 @@ class SketchMode {
     } else if (e.key === 'Enter') {
       this._endChain();
       this._renderPreview();
-    } else if ((e.key === 'Delete' || e.key === 'Backspace') && this.tool === 'select' && this._selectedId !== null) {
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') && this.tool === 'select' && this._sel.length) {
       this._pushUndo();
-      this.entities = this.entities.filter(en => en.id !== this._selectedId);
-      this._selectedId = null;
+      const entIds = this._sel.filter(s => s.kind === 'ent').map(s => s.id);
+      const conIds = new Set(this._sel.filter(s => s.kind === 'con').map(s => s.id));
+      // "deleting" a selected point removes its anchor (the point itself
+      // belongs to whatever entities use it)
+      for (const s of this._sel) {
+        if (s.kind !== 'pt') { continue; }
+        const a = this.constraints.find(k => k.type === 'anchor' && k.ptId === s.id);
+        if (a) { conIds.add(a.id); }
+      }
+      this.constraints = this.constraints.filter(c => !conIds.has(c.id));
+      if (entIds.length) { this._deleteEntities(entIds); }
+      this._sel = [];
+      this._solve();
       this._renderEntities();
       this._renderPreview();
     } else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault();
       this._undo();
     } else if (e.ctrlKey || e.metaKey || e.altKey) { /* leave browser/app combos alone */ }
+    else if (this.tool === 'select' && this._sel.length && RELATION_KEYS[e.key.toLowerCase()]) {
+      this._applyRelation(RELATION_KEYS[e.key.toLowerCase()]);
+    }
     else if (e.key.toLowerCase() === 'l') { this.setTool('line'); }
     else if (e.key.toLowerCase() === 'r') { this.setTool('rect'); }
     else if (e.key.toLowerCase() === 'c') { this.setTool('circle'); }
@@ -966,18 +1895,51 @@ class SketchMode {
   //  Undo
   // =====================================================================
 
+  /** Serialize with point topology: entities store point ids, not coords,
+   *  so restoring keeps endpoints shared. */
+  _serialize() {
+    const idOf = new Map(this.points.map(r => [r.p, r.id]));
+    const ents = this.entities.map(e => {
+      const o = { ...e };
+      if (e.type === 'line') { o.a = idOf.get(e.a); o.b = idOf.get(e.b); }
+      else { o.c = idOf.get(e.c); }
+      return o;
+    });
+    return JSON.stringify({
+      points: this.points.map(r => ({ id: r.id, p: [r.p[0], r.p[1]] })),
+      ents,
+      cons: this.constraints,
+    });
+  }
+
+  _restoreState(json) {
+    const s = JSON.parse(json);
+    const byId = new Map();
+    this.points = s.points.map(r => {
+      const rec = { id: r.id, p: [r.p[0], r.p[1]] };
+      byId.set(r.id, rec.p);
+      return rec;
+    });
+    this.entities = s.ents.map(e => {
+      const o = { ...e };
+      if (e.type === 'line') { o.a = byId.get(e.a); o.b = byId.get(e.b); }
+      else { o.c = byId.get(e.c); }
+      return o;
+    });
+    this.constraints = s.cons;
+  }
+
   _pushUndo() {
-    this._undoStack.push(JSON.stringify({ entities: this.entities, variables: this.variables }));
+    this._undoStack.push(this._serialize());
     if (this._undoStack.length > 100) { this._undoStack.shift(); }
   }
 
   _undo() {
     const snap = this._undoStack.pop();
     if (!snap) { return; }
-    const state = JSON.parse(snap);
-    this.entities = state.entities;
-    this.variables = state.variables;
-    this._selectedId = null;
+    this._restoreState(snap);
+    this._sel = [];
+    this._dragCand = null;
     this._hoverTrim = null;
     this._renderEntities();
     this._renderPreview();
@@ -1112,31 +2074,44 @@ class SketchMode {
   _applyTrim(piece) {
     const ent = piece.ent;
     this.entities = this.entities.filter(e => e.id !== ent.id);
+    // H/V carries over to line pieces; other relations/dims on the trimmed
+    // entity no longer describe it and are dropped
+    const inherited = this.constraints
+      .filter(c => (c.type === 'horizontal' || c.type === 'vertical') && c.entId === ent.id)
+      .map(c => c.type);
+    this.constraints = this.constraints.filter(c =>
+      !(c.entId === ent.id || c.aId === ent.id || c.bId === ent.id));
 
-    if (piece.whole) { return; }
-
-    if (ent.type === 'line') {
-      if (piece.lo > 1e-6) {
-        this.entities.push({ id: this._nextId++, type: 'line', a: ent.a, b: lerp2(ent.a, ent.b, piece.lo) });
-      }
-      if (piece.hi < 1 - 1e-6) {
-        this.entities.push({ id: this._nextId++, type: 'line', a: lerp2(ent.a, ent.b, piece.hi), b: ent.b });
-      }
-    } else if (ent.type === 'circle') {
-      // Removing (aLo → aHi) leaves an arc from aHi ccw back to aLo
-      const a0 = piece.aHi;
-      const a1 = a0 + norm2pi(piece.aLo - piece.aHi);
-      if (a1 - a0 > 1e-6) {
-        this.entities.push({ id: this._nextId++, type: 'arc', c: ent.c, r: ent.r, a0, a1 });
-      }
-    } else { // arc
-      if (piece.arcLo - ent.a0 > 1e-6) {
-        this.entities.push({ id: this._nextId++, type: 'arc', c: ent.c, r: ent.r, a0: ent.a0, a1: piece.arcLo });
-      }
-      if (ent.a1 - piece.arcHi > 1e-6) {
-        this.entities.push({ id: this._nextId++, type: 'arc', c: ent.c, r: ent.r, a0: piece.arcHi, a1: ent.a1 });
+    if (!piece.whole) {
+      if (ent.type === 'line') {
+        const pieces = [];
+        if (piece.lo > 1e-6) {
+          pieces.push({ id: this._nextId++, type: 'line', a: ent.a, b: this._canonPt(lerp2(ent.a, ent.b, piece.lo)) });
+        }
+        if (piece.hi < 1 - 1e-6) {
+          pieces.push({ id: this._nextId++, type: 'line', a: this._canonPt(lerp2(ent.a, ent.b, piece.hi)), b: ent.b });
+        }
+        for (const p of pieces) {
+          for (const t of inherited) { this._addConstraint({ type: t, entId: p.id }); }
+        }
+        this.entities.push(...pieces);
+      } else if (ent.type === 'circle') {
+        // Removing (aLo → aHi) leaves an arc from aHi ccw back to aLo
+        const a0 = piece.aHi;
+        const a1 = a0 + norm2pi(piece.aLo - piece.aHi);
+        if (a1 - a0 > 1e-6) {
+          this.entities.push({ id: this._nextId++, type: 'arc', c: ent.c, r: ent.r, a0, a1 });
+        }
+      } else { // arc
+        if (piece.arcLo - ent.a0 > 1e-6) {
+          this.entities.push({ id: this._nextId++, type: 'arc', c: ent.c, r: ent.r, a0: ent.a0, a1: piece.arcLo });
+        }
+        if (ent.a1 - piece.arcHi > 1e-6) {
+          this.entities.push({ id: this._nextId++, type: 'arc', c: ent.c, r: ent.r, a0: piece.arcHi, a1: ent.a1 });
+        }
       }
     }
+    this._gcPoints();
   }
 
   // =====================================================================
@@ -1163,7 +2138,11 @@ class SketchMode {
 
     const info = this._dimInfo(hit.ent.id, null);
     if (!info) { return; }
-    this._openDimBox(e, hit.ent.id, info);
+    // An existing dimension on this entity re-opens with its variable binding
+    const type = info.kind === 'length' ? 'length' : 'radius';
+    const con = this.constraints.find(k => k.type === type && k.entId === hit.ent.id);
+    const prefill = con && con.varName ? con.varName + '=' + fmt(con.value) : undefined;
+    this._openDimBox(e, hit.ent.id, info, prefill);
     this._renderEntities();
   }
 
@@ -1188,74 +2167,55 @@ class SketchMode {
         const n = [-u[1], u[0]];
         const nUnit = scale2(n, 1 / len2(n));
         const d = dot2(sub2(anchor(B), anchor(A)), nUnit);
-        return { kind: 'distance', value: Math.abs(d), dir: d >= 0 ? nUnit : scale2(nUnit, -1), aId, bId };
+        return { kind: 'distance', value: Math.abs(d), dir: d >= 0 ? nUnit : scale2(nUnit, -1), aId, bId, mode: 'perp' };
       }
     }
     const delta = sub2(anchor(B), anchor(A));
     const d = len2(delta);
     if (d < 1e-9) { return null; }
-    return { kind: 'distance', value: d, dir: scale2(delta, 1 / d), aId, bId };
+    return { kind: 'distance', value: d, dir: scale2(delta, 1 / d), aId, bId, mode: 'center' };
   }
 
-  /** Apply a new value. Typed values are exact — never rounded or snapped. */
-  _applyDim(info, newValue, varName) {
+  /** Apply a new value: create (or update) a persistent dimension constraint
+   *  and re-solve. Typed values are exact — never rounded or snapped. An
+   *  unsatisfiable value is rejected with a floating explanation of the
+   *  actual limit. */
+  _applyDim(info, newValue, varName, clientPos) {
+    const hadBad = this.constraints.some(k => k.unsat);
     this._pushUndo();
-    const A = this.entities.find(e => e.id === info.aId);
-    if (!A) { return; }
-
-    if (info.bId === null) {
-      if (info.kind === 'length') {
-        const L = dist2(A.a, A.b);
-        if (L > 1e-9 && Math.abs(newValue - L) > 1e-12) {
-          const u = scale2(sub2(A.b, A.a), 1 / L);
-          const delta = scale2(u, newValue - L);
-          const oldB = A.b.slice();
-          A.b = add2(A.b, delta);
-          this._stretchCoincident([oldB], delta, A.id);
-        }
-        if (varName) { A.lenVar = varName; }
-      } else {
-        A.r = newValue;
-        if (varName) { A.rVar = varName; }
-      }
+    let c;
+    if (info.bId === null || info.bId === undefined) {
+      const type = info.kind === 'length' ? 'length' : 'radius';
+      c = this.constraints.find(k => k.type === type && k.entId === info.aId)
+        || this._addConstraint({ type, entId: info.aId, value: newValue });
     } else {
-      const B = this.entities.find(e => e.id === info.bId);
-      if (B) {
-        const delta = scale2(info.dir, newValue - info.value);
-        this._translateEntity(B, delta);
-      }
+      c = this._findConstraint({ type: 'dist', aId: info.aId, bId: info.bId })
+        || this._addConstraint({ type: 'dist', aId: info.aId, bId: info.bId, value: newValue, mode: info.mode || 'center' });
       if (varName) {
         console.log('Sketch: variable "' + varName + '" was created, but distance dimensions emit literal coordinates for now.');
       }
     }
-    if (varName) { this.variables.push({ name: varName, value: newValue }); }
+    if (!c) { return; }
+    c.value = newValue;
+    if (varName) { c.varName = varName; }
+    if (!this._solveQuiet() && !hadBad) {
+      this._rejectEdit([c], clientPos);
+      return;
+    }
     this._renderEntities();
   }
 
-  /** Move a whole entity; line endpoints drag coincident line endpoints along
-   *  (simple stretch — keeps rectangles closed when one side moves). */
-  _translateEntity(e, delta) {
-    if (e.type === 'line') {
-      const olds = [e.a.slice(), e.b.slice()];
-      e.a = add2(e.a, delta);
-      e.b = add2(e.b, delta);
-      this._stretchCoincident(olds, delta, e.id);
-    } else {
-      e.c = add2(e.c, delta);
-    }
+  /** Reopen the edit box for an existing dimension constraint (glyph click). */
+  _openDimBoxForCon(e, con) {
+    const aId = con.entId !== undefined ? con.entId : con.aId;
+    const bId = con.bId !== undefined ? con.bId : null;
+    const info = this._dimInfo(aId, bId);
+    if (!info) { return; }
+    const prefill = con.varName ? con.varName + '=' + fmt(con.value) : fmt(con.value);
+    this._openDimBox(e, aId, info, prefill);
   }
 
-  _stretchCoincident(oldPts, delta, excludeId) {
-    for (const o of this.entities) {
-      if (o.id === excludeId || o.type !== 'line') { continue; }
-      for (const p of oldPts) {
-        if (samePt(o.a, p)) { o.a = add2(o.a, delta); }
-        if (samePt(o.b, p)) { o.b = add2(o.b, delta); }
-      }
-    }
-  }
-
-  _openDimBox(e, aId, info) {
+  _openDimBox(e, aId, info, prefill) {
     this._closeDimBox();
     const panel = this._vp.goldenContainer.element;
     const pRect = panel.getBoundingClientRect();
@@ -1272,13 +2232,12 @@ class SketchMode {
 
     const input = document.createElement('input');
     input.type = 'text';
-    input.value = fmt(info.value);
+    input.value = prefill !== undefined ? prefill : fmt(info.value);
     input.title = 'Enter a value, a name (creates a variable), or name=value';
     box.appendChild(input);
     panel.appendChild(box);
 
-    this._dim = { aId, bId: null, box, input, info };
-    this._selectedId = aId;
+    this._dim = { aId, bId: info.bId !== undefined ? info.bId : null, box, input, info };
 
     input.addEventListener('keydown', (ev) => {
       ev.stopPropagation();
@@ -1299,8 +2258,9 @@ class SketchMode {
         return;
       }
       const info = dim.info;
+      const bRect = box.getBoundingClientRect();
       this._closeDimBox();
-      this._applyDim(info, value, varName);
+      this._applyDim(info, value, varName, [bRect.left + bRect.width / 2, bRect.top]);
     });
     setTimeout(() => { input.focus(); input.select(); }, 0);
   }
@@ -1348,13 +2308,143 @@ class SketchMode {
     return pts;
   }
 
+  /** Canvas-text sprite for constraint glyphs / dimension values. Textures
+   *  are cached per (text, color); materials are per-sprite and disposable. */
+  _textSprite(text, color) {
+    const key = text + '|' + color;
+    let entry = this._texCache.get(key);
+    if (!entry) {
+      const canvas = document.createElement('canvas');
+      let ctx = canvas.getContext('2d');
+      const font = '26px "Segoe UI", system-ui, sans-serif';
+      ctx.font = font;
+      canvas.width = Math.ceil(ctx.measureText(text).width) + 14;
+      canvas.height = 36;
+      ctx = canvas.getContext('2d'); // resize resets state
+      ctx.font = font;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(17, 17, 17, 0.65)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = color;
+      ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 1);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.minFilter = THREE.LinearFilter;
+      entry = { tex, aspect: canvas.width / canvas.height };
+      this._texCache.set(key, entry);
+    }
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: entry.tex, depthTest: false, transparent: true,
+    }));
+    spr.userData.aspect = entry.aspect;
+    spr.renderOrder = 999;
+    return spr;
+  }
+
+  /** Midpoint + outward offset direction for placing an entity's glyphs. */
+  _entGlyphPos(ent) {
+    if (ent.type === 'line') {
+      const m = lerp2(ent.a, ent.b, 0.5);
+      const L = dist2(ent.a, ent.b) || 1;
+      return { base: m, dir: [-(ent.b[1] - ent.a[1]) / L, (ent.b[0] - ent.a[0]) / L] };
+    }
+    const ang = ent.type === 'circle' ? Math.PI / 4 : (ent.a0 + ent.a1) / 2;
+    return { base: arcPt(ent, ang), dir: [Math.cos(ang), Math.sin(ang)] };
+  }
+
   _renderEntities() {
     if (!this._entityGroup) { return; }
     this._disposeChildren(this._entityGroup);
+    const def = this._def;
+    const selEnts = new Set(this._sel.filter(s => s.kind === 'ent').map(s => s.id));
+    const selPts = new Set(this._sel.filter(s => s.kind === 'pt').map(s => s.id));
+    const selCons = new Set(this._sel.filter(s => s.kind === 'con').map(s => s.id));
+
     for (const ent of this.entities) {
-      const isSel = ent.id === this._selectedId || (this._dim && (ent.id === this._dim.aId || ent.id === this._dim.bId));
+      const isSel = selEnts.has(ent.id) ||
+        (this._dim && (ent.id === this._dim.aId || ent.id === this._dim.bId));
       this._entityGroup.add(this._makeLine(this._entityPoints(ent), isSel ? COLOR_ACCENT : COLOR_ENTITY));
     }
+
+    // Endpoint/center markers (selectable, draggable)
+    if (this.points.length) {
+      const norm = [], sel = [];
+      for (const r of this.points) {
+        (selPts.has(r.id) ? sel : norm).push(def.toThree(r.p[0], r.p[1]));
+      }
+      const mkPts = (pts, size, color) => {
+        if (!pts.length) { return; }
+        const g = new THREE.BufferGeometry().setFromPoints(pts);
+        const m = new THREE.Points(g, new THREE.PointsMaterial({
+          color, size, sizeAttenuation: false, depthTest: false,
+        }));
+        m.renderOrder = 999;
+        this._entityGroup.add(m);
+      };
+      mkPts(norm, 5, 0xbdbdbd);
+      mkPts(sel, 9, COLOR_ACCENT);
+    }
+
+    // Constraint glyphs (relations + dimension values), stacked per entity
+    this._glyphHits = [];
+    const glyphSize = this._pixelWorld(16);
+    const stack = new Map();
+    const place = (key, base, dir) => {
+      const n = stack.get(key) || 0;
+      stack.set(key, n + 1);
+      const off = this._pixelWorld(10) + glyphSize * (n + 0.5) + (n > 0 ? this._pixelWorld(2) * n : 0);
+      return [base[0] + dir[0] * off, base[1] + dir[1] * off];
+    };
+
+    for (const con of this.constraints) {
+      const isDim = con.type === 'length' || con.type === 'radius' || con.type === 'dist';
+      let label = GLYPHS[con.type];
+      const targets = [];
+
+      if (con.type === 'anchor') {
+        const p = this._ptById(con.ptId);
+        if (p) { targets.push({ key: 'p' + con.ptId, base: p, dir: [0.75, 0.75] }); }
+      } else if (isDim) {
+        label = (con.varName ? con.varName + '=' : '') + fmt(con.value);
+        if (con.type === 'radius') { label = 'R ' + label; }
+        if (con.type === 'dist') {
+          const A = this._ent(con.aId), B = this._ent(con.bId);
+          if (A && B) {
+            const mA = this._entGlyphPos(A).base, mB = this._entGlyphPos(B).base;
+            targets.push({ key: 'c' + con.id, base: lerp2(mA, mB, 0.5), dir: [0, 0] });
+          }
+        } else {
+          const ent = this._ent(con.entId);
+          if (ent) { const g = this._entGlyphPos(ent); targets.push({ key: 'e' + ent.id, ...g }); }
+        }
+      } else if (con.entId !== undefined) {
+        const ent = this._ent(con.entId);
+        if (ent) { const g = this._entGlyphPos(ent); targets.push({ key: 'e' + ent.id, ...g }); }
+      } else {
+        for (const id of [con.aId, con.bId]) {
+          const ent = this._ent(id);
+          if (ent) { const g = this._entGlyphPos(ent); targets.push({ key: 'e' + ent.id, ...g }); }
+        }
+      }
+      if (!label) { continue; }
+
+      const color = con.unsat ? GLYPH_BAD
+        : selCons.has(con.id) ? GLYPH_SEL
+        : isDim ? GLYPH_DIM : GLYPH_REL;
+      for (const t of targets) {
+        const pos = place(t.key, t.base, t.dir);
+        const spr = this._textSprite(label, color);
+        spr.scale.set(glyphSize * spr.userData.aspect, glyphSize, 1);
+        spr.position.copy(def.toThree(pos[0], pos[1]));
+        this._entityGroup.add(spr);
+        this._glyphHits.push({
+          x: pos[0], y: pos[1],
+          hw: glyphSize * spr.userData.aspect / 2, hh: glyphSize / 2,
+          conId: con.id,
+        });
+      }
+    }
+
     this._env.viewDirty = true;
   }
 
@@ -1462,6 +2552,24 @@ class SketchMode {
       const closed = chain.length > 1
         ? samePt(chain[0].from, chain[chain.length - 1].to)
         : false;
+      // Normalize winding to counter-clockwise: the kernel builds the face
+      // directly on the wire, so a clockwise profile yields a face whose
+      // normal points away from the viewer (renders as a dark "shadow" and
+      // extrudes inside-out). The walk direction is arbitrary — fix it here.
+      const poly = [];
+      for (const s of chain) {
+        poly.push(s.from);
+        if (s.ent.type === 'arc') { poly.push(arcPt(s.ent, (s.ent.a0 + s.ent.a1) / 2)); }
+      }
+      let area = 0;
+      for (let i = 0; i < poly.length; i++) {
+        const p = poly[i], q = poly[(i + 1) % poly.length];
+        area += p[0] * q[1] - q[0] * p[1];
+      }
+      if (area < 0) {
+        chain.reverse();
+        for (const s of chain) { const t = s.from; s.from = s.to; s.to = t; }
+      }
       return { segs: chain, closed };
     });
   }
@@ -1511,7 +2619,21 @@ class SketchMode {
     const out = [];
     out.push(`// --- Sketch (${this.plane} plane) ---`);
 
-    for (const v of this.variables) {
+    // Named dimensions become variables; length/radius dims bind the emitted
+    // literal to the variable name
+    for (const e of this.entities) { delete e.lenVar; delete e.rVar; }
+    const variables = [];
+    for (const c of this.constraints) {
+      if (!c.varName) { continue; }
+      if (!variables.some(v => v.name === c.varName)) {
+        variables.push({ name: c.varName, value: c.value });
+      }
+      const ent = c.entId !== undefined ? this._ent(c.entId) : null;
+      if (c.type === 'length' && ent) { ent.lenVar = c.varName; }
+      if (c.type === 'radius' && ent) { ent.rVar = c.varName; }
+    }
+
+    for (const v of variables) {
       if (new RegExp('\\b(let|const|var)\\s+' + v.name + '\\b').test(existing)) {
         out.push(`// (dimension uses existing variable "${v.name}")`);
       } else {
