@@ -101,6 +101,9 @@ typings/
 # Serverless directories
 .serverless/
 
+# Netlify CLI local state (site link, build cache, plugins) — machine-specific
+.netlify/
+
 # FuseBox cache
 .fusebox/
 
