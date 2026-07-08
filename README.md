@@ -7,6 +7,10 @@ ChiselCAD is a personal, opinionated fork of [zalo's CascadeStudio](https://gith
 The guiding idea is **GUI for creation, code for editing.** Authoring geometry from scratch in text is slow, so you click out lines, rectangles, circles and constraints directly in the 3D view. But the moment a sketch is committed it becomes plain JavaScript in the editor — and from then on the *code is the model*. Changing a radius means editing the literal (the model re-evaluates live as you type); there is no hidden sketch state, no open/edit/save modal loop, no property dialogs to hunt through.
 
 <p align="center">
+  <img src="./packages/cascade-studio/icon/chiselmain.png" alt="The ChiselCAD IDE: the parametric chisel starter model in the 3D viewport alongside its JavaScript source" width="900">
+</p>
+
+<p align="center">
   <img src="./packages/cascade-studio/icon/Variety.png" height="170">
   <img src="./packages/cascade-studio/icon/Fillet.png" height="170">
   <img src="./packages/cascade-studio/icon/RotatedExtrusion.png" height="170">
