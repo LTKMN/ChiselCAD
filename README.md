@@ -1,30 +1,28 @@
 # ChiselCAD
 
-**A code-first parametric CAD tool for the browser — sketch it with the mouse, keep it as code.**
+**A code-first parametric CAD tool for the browser**
 
-ChiselCAD is a personal, opinionated fork of [zalo's CascadeStudio](https://github.com/zalo/CascadeStudio). It runs the full [OpenCascade](https://github.com/Open-Cascade-SAS/OCCT) (OCCT 8.0) kernel compiled to WebAssembly, with a Three.js viewport and a Monaco editor, and it is built around one workflow: **draw a sketch, pull it into a feature, tune the numbers in code, export for 3D printing.**
+ChiselCAD is a personal, opinionated fork of [zalo's CascadeStudio](https://github.com/zalo/CascadeStudio). It runs the full [OpenCascade](https://github.com/Open-Cascade-SAS/OCCT) (OCCT 8.0) kernel compiled to WebAssembly, with a Three.js viewport and a Monaco editor, and it is built around one workflow: **draw a sketch, pull it into a feature, tune numbers and variables in code, export for 3D printing.**
 
-The guiding idea is **GUI for creation, code for editing.** Authoring geometry from scratch in text is slow, so you click out lines, rectangles, circles and constraints directly in the 3D view. But the moment a sketch is committed it becomes plain JavaScript in the editor — and from then on the *code is the model*. Changing a radius means editing the literal (the model re-evaluates live as you type); there is no hidden sketch state, no open/edit/save modal loop, no property dialogs to hunt through.
+The main idea is **GUI for creation, code for editing.** Writing geometry from scratch in code is slow and clunky - way easier to click and draw out lines, shapes and constraints directly in the 3D view. But the moment a sketch is committed it becomes plain JavaScript in the editor — and from then on the *code is the model*. Changing a radius is right there, you don't have to go back into sketch editors and layers of menus; no open/edit/save modal loop, no property dialogs to hunt through, etc.
 
 <p align="center">
   <img src="./packages/cascade-studio/icon/chiselmain.png" alt="The ChiselCAD IDE: the parametric chisel starter model in the 3D viewport alongside its JavaScript source" width="900">
 </p>
 
 <p align="center">
-  <img src="./packages/cascade-studio/icon/Variety.png" height="170">
-  <img src="./packages/cascade-studio/icon/Fillet.png" height="170">
-  <img src="./packages/cascade-studio/icon/RotatedExtrusion.png" height="170">
-  <img src="./packages/cascade-studio/icon/Loft.png" height="170">
+  <img src="./packages/cascade-studio/icon/Variety.png" height="150">
+  <img src="./packages/cascade-studio/icon/Fillet.png" height="150">
+  <img src="./packages/cascade-studio/icon/RotatedExtrusion.png" height="150">
+  <img src="./packages/cascade-studio/icon/Loft.png" height="150">
 </p>
-
-> Forked from CascadeStudio. The upstream engine, standard library and JavaScript/OpenSCAD editor remain under their original MIT license; the additions this fork makes are **source-available for non-commercial use** (see [License](#license)). The rename and in-app branding are an ongoing cleanup, so parts of the source still read `CascadeStudio` internally.
 
 ## What this fork adds
 
 - **In-viewport sketching** — hit Sketch and pick your plane right in the 3D view: ghost quads for the three origin planes, or any *flat face of the model* (sketch-on-face). The camera flattens square-on into an orthographic view with a grid aligned to the picked plane. Draw with Line, Rect, Circle, Trim and Dimension tools; snapping keeps mouse-derived values on clean round numbers while anything you *type* is treated as exact and left untouched. Saving emits a tidy `new Sketch(...).LineTo(...).End(true).Face()` block into the editor as a single undoable edit — face sketches bake their plane as `{ origin, normal, xDir }` literals, so the code stands alone.
-- **Blender-style navigation** — middle-mouse orbits, Shift+middle (or right-drag) pans, wheel zooms. The left button is reserved for selecting and sketching.
+- **Blender-style navigation** — middle-mouse orbits, Shift+middle (or right-drag) pans, wheel zooms. Certain hotkeys like camera view controls being 1,3,5,7. Blender theme support if you want themes.
 - **A lightweight constraint solver** — a small relaxation solver (sequential projection, no heavyweight algebraic engine) keeps a deliberately short list of relations satisfied: **anchor, horizontal, vertical, parallel, perpendicular, equal, concentric, tangent**, plus persistent **dimensions**. Endpoints that snap together are genuinely *shared* points, so corners stay closed through any edit. Drag a point or edge and everything constrained to it follows in real time. Over-constrain it and the offending relations simply tint red — no modal "mating error" dialogs.
-- **Feasibility feedback that floats** — when a dimension or relation can't be satisfied, ChiselCAD finds the nearest legal value and floats a message up from the cursor (RollerCoaster-Tycoon style), e.g. *"this line can't be longer than 28.28 here — held by anchors + dimensions."* The rejected edit reverts cleanly instead of leaving red behind.
+- **Feasibility feedback that floats** — when a dimension or relation can't be satisfied, ChiselCAD finds the nearest legal value and floats a message up, e.g. *"this line can't be longer than 28.28 here — held by anchors + dimensions."* The rejected edit reverts cleanly instead of leaving red behind. Trying to avoid janky failure states and crazy things happening to you.
 - **A feature command bar** — one click to Extrude / Revolve / Loft / Pipe the latest sketch, or to Fillet / Chamfer / Union / Cut / Intersect by *clicking the bodies in the viewport*. Each emits code with the key number (depth, angle, radius) pre-selected so you can immediately type over it. Picking a sketch face auto-wraps it in a plane-aware `Extrude`, so "cut this sketch out of that solid" is two clicks.
 - **Live evaluation** — the model re-evaluates continuously as you type (debounced) and while you drag GUI sliders; evaluations serialize and coalesce so heavy models stay responsive.
 - **Bidirectional code ↔ 3D ↔ GUI linking** — the cursor's line highlights its GUI control and glows the geometry that line produced; clicking a shape in the viewport selects the whole block of code that built it and jumps the cursor to its defining line.
@@ -47,6 +45,10 @@ The guiding idea is **GUI for creation, code for editing.** Authoring geometry f
 
 ## Getting Started
 
+**[chiselCAD.brennan.computer](https://chiselcad.brennan.computer/) for the live web version**
+
+Or you can clone and run it locally:
+
 ```bash
 npm install
 npm run build
@@ -54,7 +56,7 @@ npx http-server ./packages/cascade-studio/dist -p 8080 -c-1
 # Open http://localhost:8080
 ```
 
-Use `-c-1` to disable caching, and a **new port** whenever you change JS, since browsers cache ES modules aggressively. Every build logs `Chisel build: <timestamp>` to the console — if a change doesn't seem to take, check that stamp first.
+Use `-c-1` to disable caching, and a **new port** whenever you change JS, since browsers cache ES modules aggressively.
 
 ### The sketch → feature → code loop
 
@@ -121,7 +123,7 @@ CenterOfMass(shape)
 
 ### OpenSCAD Mode
 
-Switch to OpenSCAD via the dropdown in the top navigation bar; ChiselCAD transpiles it to the JavaScript standard library.
+Switch to OpenSCAD via the dropdown in the bottom bar of the code editor; ChiselCAD transpiles it to the JavaScript standard library.
 
 ```openscad
 difference() {
@@ -230,7 +232,7 @@ WebGL rendering in headless mode requires `--use-gl=angle --use-angle=swiftshade
 
 ## Credits
 
-ChiselCAD is a fork of **[CascadeStudio](https://github.com/zalo/CascadeStudio)** by [Johnathon Selstad (@zalo)](https://github.com/zalo) — all of the kernel, standard library, editor and engine groundwork is his, and remains under his MIT license. This fork adds the in-viewport sketch/constraint/feature workflow and various quality-of-life changes for a personal 3D-printing setup.
+ChiselCAD is a fork of **[CascadeStudio](https://github.com/zalo/CascadeStudio)** by [Johnathon Selstad (@zalo)](https://github.com/zalo) — all of the kernel, standard library, editor and engine groundwork is his, and remains under his MIT license
 
 Built on:
 
@@ -250,6 +252,4 @@ Built on:
 ChiselCAD carries two sets of terms, both in the [LICENSE](./LICENSE) file:
 
 - **Upstream CascadeStudio code** — MIT License, © 2020 Johnathon Selstad. Unchanged and irrevocable.
-- **ChiselCAD's own additions** — source-available for **non-commercial use** (personal, hobbyist, educational, research), © 2026 Brennan. They may not be sold or built into a commercial product or service without written permission.
-
-Because the upstream base is MIT, anyone remains free to use *CascadeStudio itself* however they like; the non-commercial terms apply only to the code this fork adds. This is not legal advice — if the distinction ever matters to you commercially, have a lawyer look it over.
+- **ChiselCAD** — free and source-available for **both commercial and non-commercial use** (personal, hobbyist, business, educational, research), © 2026 Brennan Letkeman. The editor program itself may not be sold, repackaged or built into a commercial product / service without written permission.
