@@ -70,9 +70,19 @@ class EditorManager {
       container.setState({ code: codeString });
     }
 
+    // Panel layout: Monaco fills the top, a slim status bar (language mode)
+    // sits along the bottom
+    container.element.style.display = 'flex';
+    container.element.style.flexDirection = 'column';
+    const editorHost = document.createElement('div');
+    editorHost.style.flex = '1 1 auto';
+    editorHost.style.minHeight = '0';
+    container.element.appendChild(editorHost);
+    container.element.appendChild(this._buildStatusBar());
+
     // Initialize the Monaco Code Editor
     const isMobile = window.innerHeight > window.innerWidth;
-    this.editor = monaco.editor.create(container.element, {
+    this.editor = monaco.editor.create(editorHost, {
       value: state.code,
       language: "typescript",
       theme: "vs-dark",
@@ -122,6 +132,27 @@ class EditorManager {
 
     // Set up keyboard shortcuts
     this._setupKeyboardShortcuts(container);
+  }
+
+  /** Bottom strip of the editor panel: the language-mode select (a
+   *  code-specific option, so it lives with the code, not in the topnav). */
+  _buildStatusBar() {
+    const bar = document.createElement('div');
+    bar.className = 'cs-editor-statusbar';
+    const select = document.createElement('select');
+    select.id = 'editorMode';
+    select.className = 'topnav-select';
+    select.title = 'Editor Language Mode';
+    for (const [value, label] of [['cascadestudio', 'CascadeStudio JS'], ['openscad', 'OpenSCAD']]) {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      select.appendChild(opt);
+    }
+    select.value = this.mode || 'cascadestudio';
+    select.addEventListener('change', (e) => this._app.switchEditorMode(e.target.value));
+    bar.appendChild(select);
+    return bar;
   }
 
   /** Legacy: Register the dockable Monaco Code Editor component with Golden Layout.

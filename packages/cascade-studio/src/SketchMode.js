@@ -17,34 +17,50 @@ import * as THREE from 'three';
 const TAU = Math.PI * 2;
 const PT_EPS = 1e-3; // endpoint coincidence tolerance (1 micron)
 
-// Sketch planes. `toThree` maps sketch (a,b) → Three.js world coords using the
-// same OCC Z-up → Three Y-up convention as the model group (-PI/2 X rotation):
-// OCC (x,y,z) → Three (x, z, -y).
-const PLANES = {
-  XY: {
-    label: 'Top (XY)',
-    toThree: (a, b) => new THREE.Vector3(a, 0, -b),
-    fromThree: (p) => [p.x, -p.z],
-    normal: new THREE.Vector3(0, 1, 0),
-    camUp: new THREE.Vector3(0, 0, -1),
-    orientGrid: (g) => {},
-  },
-  XZ: {
-    label: 'Front (XZ)',
-    toThree: (a, b) => new THREE.Vector3(a, b, 0),
-    fromThree: (p) => [p.x, p.y],
-    normal: new THREE.Vector3(0, 0, 1),
-    camUp: new THREE.Vector3(0, 1, 0),
-    orientGrid: (g) => { g.rotation.x = Math.PI / 2; },
-  },
-  YZ: {
-    label: 'Right (YZ)',
-    toThree: (a, b) => new THREE.Vector3(0, b, -a),
-    fromThree: (p) => [-p.z, p.y],
-    normal: new THREE.Vector3(1, 0, 0),
-    camUp: new THREE.Vector3(0, 1, 0),
-    orientGrid: (g) => { g.rotation.z = Math.PI / 2; },
-  },
+// Sketch planes are defined in OCC space by an origin and two orthonormal
+// axis directions (xDir, yDir); the sketch's local (a, b) coordinates map to
+// origin + a*xDir + b*yDir. Everything the viewport needs (toThree, fromThree,
+// normal, camUp, grid) is derived from that frame, so an arbitrary face plane
+// works exactly like a cardinal one. Three world coords follow the model
+// group's OCC Z-up → Three Y-up convention (-PI/2 X rotation): (x,y,z)→(x,z,-y).
+const OCC2THREE = (v) => new THREE.Vector3(v[0], v[2], -v[1]);
+const cross3 = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const dot3 = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+const norm3 = (a) => { const L = Math.hypot(a[0],a[1],a[2]) || 1; return [a[0]/L, a[1]/L, a[2]/L]; };
+
+/** Build a plane object from an OCC origin + two OCC axis directions. */
+function makePlane(occOrigin, occX, occY, opts = {}) {
+  const O = occOrigin, X = occX, Y = occY;
+  const occNormal = cross3(X, Y);
+  const origin3 = OCC2THREE(O);
+  const x3 = OCC2THREE(X).normalize();
+  const y3 = OCC2THREE(Y).normalize();
+  const normal = new THREE.Vector3().crossVectors(x3, y3).normalize();
+  return {
+    key: opts.key || null,
+    label: opts.label || 'On face',
+    occOrigin: O, occX: X, occY: Y, occNormal,
+    origin3, x3, y3, normal, camUp: y3.clone(),
+    toThree(a, b) { return origin3.clone().addScaledVector(x3, a).addScaledVector(y3, b); },
+    fromThree(p) { const d = p.clone().sub(origin3); return [d.dot(x3), d.dot(y3)]; },
+  };
+}
+
+/** Bake a picked model face into a sketch plane: orthonormal frame with yDir
+ *  pointing "up" (world Z projected onto the plane; world Y for horizontal
+ *  faces). Kept identical on both sides so emitted xDir round-trips exactly. */
+function makeFacePlane(origin, normal) {
+  const N = norm3(normal);
+  const up = Math.abs(N[2]) < 0.99 ? [0, 0, 1] : [0, 1, 0];
+  let Y = norm3([up[0] - dot3(up, N) * N[0], up[1] - dot3(up, N) * N[1], up[2] - dot3(up, N) * N[2]]);
+  const X = cross3(Y, N); // X × Y = N (right-handed)
+  return makePlane(origin, X, Y, { label: 'On face' });
+}
+
+const CARDINAL = {
+  XY: () => makePlane([0, 0, 0], [1, 0, 0], [0, 1, 0], { key: 'XY', label: 'Top (XY)' }),
+  XZ: () => makePlane([0, 0, 0], [1, 0, 0], [0, 0, 1], { key: 'XZ', label: 'Front (XZ)' }),
+  YZ: () => makePlane([0, 0, 0], [0, 1, 0], [0, 0, 1], { key: 'YZ', label: 'Right (YZ)' }),
 };
 
 const TOOLS = [
@@ -53,7 +69,7 @@ const TOOLS = [
   { id: 'rect',   icon: '▭', label: 'Rect',   hint: 'Click two opposite corners' },
   { id: 'circle', icon: '◯', label: 'Circle', hint: 'Click the center, then a point on the circle' },
   { id: 'trim',   icon: '✂', label: 'Trim',   hint: 'Click the piece of an element to remove (cut at intersections)' },
-  { id: 'dim',    icon: '↔', label: 'Dimension', hint: 'Click an element (then optionally a second) • type a value, or a name to create a variable' },
+  { id: 'dim',    icon: '↔', label: 'Dimension', hint: 'Click an element, then optionally a second — including dashed model edges • type a value, or a name to create a variable' },
 ];
 
 // Relations the user can apply to the current selection. Keys work in the
@@ -161,6 +177,7 @@ class SketchMode {
     this._app = app;
     this.active = false;
     this.plane = 'XY';
+    this._planeDef = CARDINAL.XY();
     this.entities = [];
     this.points = [];      // [{id, p:[x,y]}] — shared endpoint/center arrays
     this.constraints = []; // [{id, type, ...}] — relations + persistent dimensions
@@ -185,22 +202,25 @@ class SketchMode {
     this._warnedUnsat = false;
 
     this._raycaster = new THREE.Raycaster();
-    this._buildPlanePopover();
   }
 
   get _vp() { return this._app.viewport; }
   get _env() { return this._app.viewport ? this._app.viewport.environment : null; }
-  get _def() { return PLANES[this.plane]; }
+  get _def() { return this._planeDef; }
 
   // =====================================================================
   //  Session lifecycle
   // =====================================================================
 
-  begin(planeKey) {
+  /** Start a sketch session on a plane object (cardinal or baked face). */
+  begin(planeDef) {
     if (this.active || !this._vp || !this._featureRow) { return; }
+    if (typeof planeDef === 'string') { planeDef = CARDINAL[planeDef](); }
+    this._endPlanePick();
     this._endPick();
     this.active = true;
-    this.plane = planeKey;
+    this._planeDef = planeDef;
+    this.plane = planeDef.key || 'custom';
     this.entities = [];
     this.points = [];
     this.constraints = [];
@@ -225,6 +245,7 @@ class SketchMode {
     this._previewGroup.position.copy(nudge);
     env.scene.add(this._staticGroup, this._entityGroup, this._previewGroup);
     this._buildStaticOverlay();
+    this._buildRefEntities();
 
     // Canvas + keyboard listeners
     const canvas = env.renderer.domElement;
@@ -253,7 +274,9 @@ class SketchMode {
     this._sketchRow.style.display = 'flex';
     this._relRow.style.display = 'flex';
     this._hint.style.display = '';
-    this._planeBadge.textContent = this.plane + ' · ' + this._def.label.split(' ')[0];
+    this._planeBadge.textContent = this._def.key
+      ? this._def.key + ' · ' + this._def.label.split(' ')[0]
+      : '⬗ ' + this._def.label;
 
     this.setTool('line');
     this._flattenCamera();
@@ -316,44 +339,137 @@ class SketchMode {
   }
 
   // =====================================================================
-  //  Plane picker popover (shared, body-level so nothing clips it)
+  //  Plane pick — choose the sketch plane by clicking in the 3D view:
+  //  a translucent ghost quad for each origin plane, or any flat model face.
+  //  Hover highlights the target; a click (not an orbit-drag) begins the
+  //  sketch there. Orbit/pan stay live so you can look before you leap.
   // =====================================================================
 
-  _buildPlanePopover() {
-    const pop = document.createElement('div');
-    pop.className = 'cs-plane-pop';
-    pop.style.display = 'none';
-    for (const key of Object.keys(PLANES)) {
-      const item = document.createElement('a');
-      item.href = '#';
-      item.textContent = PLANES[key].label;
-      item.addEventListener('click', (e) => {
-        e.preventDefault();
-        pop.style.display = 'none';
-        this.begin(key);
-      });
-      pop.appendChild(item);
-    }
-    document.body.appendChild(pop);
-    this._planePop = pop;
+  _startPlanePick(btn) {
+    if (this.active) { return; }
+    this._endPick();
+    if (this._planePick) { this._endPlanePick(); return; } // toggle off
+    const env = this._env;
+    if (!env) { return; }
 
-    document.addEventListener('mousedown', (e) => {
-      if (pop.style.display !== 'none' && !pop.contains(e.target) && e.target !== this._sketchBtn) {
-        pop.style.display = 'none';
-      }
-    });
+    const S = 120; // ghost half-extent (world units)
+    const group = new THREE.Group();
+    const ghosts = [];
+    for (const key of ['XY', 'XZ', 'YZ']) {
+      const pd = CARDINAL[key]();
+      const c = [[-S, -S], [S, -S], [S, S], [-S, S]].map(([a, b]) => pd.toThree(a, b));
+      const fillGeo = new THREE.BufferGeometry().setFromPoints([c[0], c[1], c[2], c[0], c[2], c[3]]);
+      const fill = new THREE.Mesh(fillGeo, new THREE.MeshBasicMaterial({
+        color: COLOR_ACCENT, transparent: true, opacity: 0.06,
+        side: THREE.DoubleSide, depthWrite: false,
+      }));
+      const edge = new THREE.Line(new THREE.BufferGeometry().setFromPoints([...c, c[0]]),
+        new THREE.LineBasicMaterial({ color: COLOR_ACCENT, transparent: true, opacity: 0.3 }));
+      const g = new THREE.Group();
+      g.add(fill, edge);
+      g.userData = { key, pd, fill, edge };
+      group.add(g);
+      ghosts.push(g);
+    }
+    env.scene.add(group);
+    this._planePick = { group, ghosts, faceHi: null, btn };
+    if (btn) { btn.classList.add('active'); }
+
+    const canvas = env.renderer.domElement;
+    const move = (e) => this._onPlanePickMove(e);
+    const key = (e) => { if (e.key === 'Escape') { this._endPlanePick(); } };
+    this._planePick.listeners = [[canvas, 'mousemove', move], [window, 'keydown', key]];
+    this._planePick.listeners.forEach(([el, ev, fn]) => el.addEventListener(ev, fn));
+    canvas.style.cursor = 'crosshair';
+    this._hint.textContent = 'Pick a plane: click a ghost plane or a flat model face to sketch on (Esc cancels)';
+    this._hint.style.display = '';
+    env.viewDirty = true;
   }
 
-  _togglePlanePopover(btn) {
-    const pop = this._planePop;
-    if (pop.style.display === 'none') {
-      const r = btn.getBoundingClientRect();
-      pop.style.left = r.left + 'px';
-      pop.style.top = (r.bottom + 4) + 'px';
-      pop.style.display = 'block';
-    } else {
-      pop.style.display = 'none';
+  _endPlanePick() {
+    const pp = this._planePick;
+    if (!pp) { return; }
+    this._clearFaceHi(); // while this._planePick still points at pp
+    this._planePick = null;
+    const env = this._env;
+    if (pp.listeners) { pp.listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn)); }
+    if (env) {
+      env.scene.remove(pp.group);
+      pp.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+      env.renderer.domElement.style.cursor = '';
+      env.viewDirty = true;
     }
+    if (pp.btn) { pp.btn.classList.remove('active'); }
+    if (!this.active) { this._hint.style.display = 'none'; }
+  }
+
+  /** Ray from a mouse event to the nearest pick target: a ghost plane, or a
+   *  flat model face (whichever the cursor is over and nearest to camera). */
+  _planePickHit(e) {
+    const env = this._env;
+    const rect = env.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1);
+    this._raycaster.setFromCamera(ndc, env.camera);
+
+    let ghostHit = null;
+    for (const g of this._planePick.ghosts) {
+      const hits = this._raycaster.intersectObject(g.userData.fill, false);
+      if (hits.length && (!ghostHit || hits[0].distance < ghostHit.distance)) {
+        ghostHit = { distance: hits[0].distance, g };
+      }
+    }
+    const face = this._vp.pickFaceAt ? this._vp.pickFaceAt(e) : null;
+    if (face && (!ghostHit || face.distance <= ghostHit.distance + 1e-4)) {
+      return { type: 'face', plane: makeFacePlane(face.origin, face.normal), worldTris: face.worldTris };
+    }
+    if (ghostHit) { return { type: 'ghost', plane: ghostHit.g.userData.pd, g: ghostHit.g }; }
+    return null;
+  }
+
+  _onPlanePickMove(e) {
+    if (!this._planePick || e.buttons !== 0) { return; } // skip mid-orbit/pan
+    this._lastClient = [e.clientX, e.clientY];
+    const hit = this._planePickHit(e);
+    for (const g of this._planePick.ghosts) {
+      g.userData.fill.material.opacity = 0.06;
+      g.userData.edge.material.opacity = 0.3;
+    }
+    this._clearFaceHi();
+    let label = 'Pick a plane: click a ghost plane or a flat model face to sketch on (Esc cancels)';
+    if (hit && hit.type === 'ghost') {
+      hit.g.userData.fill.material.opacity = 0.2;
+      hit.g.userData.edge.material.opacity = 0.95;
+      label = hit.plane.label + ' plane — click to sketch here';
+    } else if (hit && hit.type === 'face') {
+      this._showFaceHi(hit.worldTris);
+      label = 'On this face — click to sketch here';
+    }
+    this._hint.textContent = label;
+    this._hint.style.display = ''; // a misclick flash may have hidden it
+    this._env.viewDirty = true;
+  }
+
+  _showFaceHi(worldTris) {
+    this._clearFaceHi();
+    const geo = new THREE.BufferGeometry().setFromPoints(worldTris);
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      color: COLOR_ACCENT, transparent: true, opacity: 0.28,
+      side: THREE.DoubleSide, depthWrite: false, depthTest: false,
+    }));
+    mesh.renderOrder = 996;
+    this._env.scene.add(mesh);
+    if (this._planePick) { this._planePick.faceHi = mesh; }
+  }
+
+  _clearFaceHi() {
+    const pp = this._planePick;
+    if (!pp || !pp.faceHi) { return; }
+    this._env.scene.remove(pp.faceHi);
+    pp.faceHi.geometry.dispose();
+    pp.faceHi.material.dispose();
+    pp.faceHi = null;
   }
 
   // =====================================================================
@@ -366,6 +482,7 @@ class SketchMode {
   attachToViewport() {
     if (!this._vp) { return; }
     if (this.active) { this.end(false); } // viewport is being replaced mid-sketch
+    this._endPlanePick();
     this._endPick();
     if (this._bar && this._bar.parentNode) { this._bar.parentNode.removeChild(this._bar); }
 
@@ -572,10 +689,10 @@ class SketchMode {
    *  Line-start anchored so block-scoped declarations don't leak in. */
   _findSketches(code) {
     const seen = new Map(); // name → plane, insertion order = recency
-    const re = /^let\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+Sketch\s*\(\s*\[[^\]]*\]\s*(?:,\s*['"](XY|XZ|YZ)['"])?/gm;
+    const re = /^let\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+Sketch\s*\(\s*\[[^\]]*\]\s*(?:,\s*(?:['"](XY|XZ|YZ)['"]|(\{)))?/gm;
     for (const m of code.matchAll(re)) {
       seen.delete(m[1]);
-      seen.set(m[1], m[2] || 'XY');
+      seen.set(m[1], m[2] || (m[3] ? 'custom' : 'XY'));
     }
     return [...seen.entries()].map(([name, plane]) => ({ name, plane }));
   }
@@ -602,14 +719,17 @@ class SketchMode {
     return base + (max + 1);
   }
 
-  /** Extrude direction that grows toward the side the sketch was drawn from. */
+  /** Extrude argument for a sketch on this plane. Baked face planes use a
+   *  scalar (extrudes along the face normal); cardinal planes use a vector
+   *  toward the side the sketch was drawn from. */
   _extrudeDirFor(plane) {
+    if (plane === 'custom') { return '20'; }
     return { XY: '[0, 0, 20]', XZ: '[0, -20, 0]', YZ: '[20, 0, 0]' }[plane] || '[0, 0, 20]';
   }
 
   _runFeature(id, btn) {
     if (id === 'sketch') {
-      if (!this.active) { this._togglePlanePopover(btn); }
+      if (!this.active) { this._startPlanePick(btn); }
       return;
     }
 
@@ -637,7 +757,7 @@ class SketchMode {
       case 'extrude': {
         if (!lastSk) { return this._flashHint('Extrude needs a sketch — draw one first'); }
         snippet = `let ${nv('solid')} = Extrude(${lastSk.name}, ${this._extrudeDirFor(lastSk.plane)});`;
-        select = '20(?=[,\\]])';
+        select = '20(?=[,)\\]])';
         break;
       }
       case 'revolve': {
@@ -665,7 +785,7 @@ class SketchMode {
           YZ: '[[0, 0, 0], [30, 0, 0], [60, 0, 20]]',
         };
         const pathVar = nv('path');
-        snippet = `let ${pathVar} = BSpline(${paths[lastSk.plane]}, false);\n` +
+        snippet = `let ${pathVar} = BSpline(${paths[lastSk.plane] || paths.XY}, false);\n` +
                   `let ${nv('solid')} = Pipe(${lastSk.name}, ${pathVar});`;
         break;
       }
@@ -706,6 +826,18 @@ class SketchMode {
 
   /** Called by the viewport on non-drag clicks. Returns true if consumed. */
   handleViewportClick(e) {
+    if (this._planePick) {
+      const hit = this._planePickHit(e);
+      if (hit) {
+        const pd = hit.plane;
+        this._endPlanePick();
+        this.begin(pd);
+      } else {
+        this._flashHint('No plane there — click a ghost plane or a flat model face (Esc cancels)');
+        this._hint.style.display = '';
+      }
+      return true;
+    }
     if (!this._pick) { return false; }
     const pick = this._pick;
 
@@ -754,12 +886,19 @@ class SketchMode {
     const sketches = this._findSketches(code);
     const nv = (base) => this._nextVarName(code, base);
     const sketchOf = (n) => sketches.find(s => s.name === n);
-    const wrap = (n) => {
+    // Face-plane sketches extrude as a SPAN [start, end] along the face
+    // normal, overshooting the surface by 0.5 — baked-plane literals are
+    // never exactly on the face, and a tool that starts right at the surface
+    // leaves a near-coplanar sliver (z-fighting). Cuts start 0.5 proud and
+    // cut in (`into`); bosses bury their root 0.5 and rise out.
+    const wrap = (n, into) => {
       const sk = sketchOf(n);
-      return sk ? `Extrude(${n}, ${this._extrudeDirFor(sk.plane)})` : n;
+      if (!sk) { return n; }
+      if (sk.plane === 'custom') { return `Extrude(${n}, [${into ? '0.5, -20' : '-0.5, 20'}])`; }
+      return `Extrude(${n}, ${this._extrudeDirFor(sk.plane)})`;
     };
     const anyWrapped = picked.some(n => sketchOf(n));
-    let snippet = null, select = anyWrapped ? '20(?=[,\\]])' : null;
+    let snippet = null, select = anyWrapped ? '-?20(?=[,)\\]])' : null;
 
     switch (feature) {
       case 'fillet':
@@ -779,7 +918,7 @@ class SketchMode {
         snippet = `let ${nv('solid')} = Union([${wrap(picked[0])}, ${wrap(picked[1])}]);`;
         break;
       case 'cut':
-        snippet = `let ${nv('solid')} = Difference(${wrap(picked[0])}, [${wrap(picked[1])}]);`;
+        snippet = `let ${nv('solid')} = Difference(${wrap(picked[0])}, [${wrap(picked[1], true)}]);`;
         break;
       case 'intersect':
         snippet = `let ${nv('solid')} = Intersection([${wrap(picked[0])}, ${wrap(picked[1])}]);`;
@@ -823,7 +962,7 @@ class SketchMode {
         dist = Math.max(120, box.min.distanceTo(box.max) * 1.2);
       }
     }
-    const target = new THREE.Vector3(0, 0, 0);
+    const target = this._def.origin3.clone();
     const pos = target.clone().addScaledVector(this._def.normal, dist);
     const up = this._def.camUp.clone();
 
@@ -893,18 +1032,110 @@ class SketchMode {
   }
 
   // =====================================================================
+  //  Reference geometry — model edges lying in the sketch plane, projected
+  //  to 2D as dashed, locked entities. They snap, take relations, and can
+  //  be the second element of a dimension ("place this circle off that
+  //  cube edge"), but never move, emit, trim, or delete.
+  // =====================================================================
+
+  _buildRefEntities() {
+    const edgesObj = this._vp.mainObject &&
+      this._vp.mainObject.getObjectByName('Model Edges');
+    if (!edgesObj || !edgesObj.globalEdgeMetadata) { return; }
+    const pos = edgesObj.geometry.getAttribute('position');
+    const def = this._def;
+    const O = def.occOrigin, X = def.occX, Y = def.occY, N = def.occNormal;
+    const TOL = 0.05;      // in-plane tolerance (mesh verts are float32)
+    const r3 = (v) => Math.round(v * 1000) / 1000; // clean snap targets
+    let added = 0;
+
+    for (const key of Object.keys(edgesObj.globalEdgeMetadata)) {
+      const meta = edgesObj.globalEdgeMetadata[key];
+      if (meta.start < 0 || added >= 400) { continue; }
+
+      // Rebuild the polyline from the segment-pair layout (a0,a1)(a1,a2)…
+      const pts = [];
+      for (let v = meta.start; v <= meta.end; v++) {
+        const p = [pos.getX(v), pos.getY(v), pos.getZ(v)];
+        const prev = pts[pts.length - 1];
+        if (!prev || dist2([prev[0], prev[1]], [p[0], p[1]]) > 1e-9 || Math.abs(prev[2] - p[2]) > 1e-9) {
+          pts.push(p);
+        }
+      }
+      if (pts.length < 2) { continue; }
+
+      // Project into sketch coords; skip anything off-plane
+      let planar = true;
+      const uv = [];
+      for (const p of pts) {
+        const d = [p[0] - O[0], p[1] - O[1], p[2] - O[2]];
+        if (Math.abs(dot3(d, N)) > TOL) { planar = false; break; }
+        uv.push([dot3(d, X), dot3(d, Y)]);
+      }
+      if (!planar) { continue; }
+
+      const a = uv[0], b = uv[uv.length - 1];
+      const chord = dist2(a, b);
+      if (uv.length === 2 || chord > 1e-6) {
+        // Straight? Interior points must hug the chord
+        let straight = chord > 1e-6;
+        if (straight && uv.length > 2) {
+          const ux = (b[0] - a[0]) / chord, uy = (b[1] - a[1]) / chord;
+          for (let i = 1; i < uv.length - 1 && straight; i++) {
+            const dx = uv[i][0] - a[0], dy = uv[i][1] - a[1];
+            if (Math.abs(dx * uy - dy * ux) > 0.01) { straight = false; }
+          }
+        }
+        if (straight) {
+          this.entities.push({
+            id: this._nextId++, type: 'line', ref: true,
+            a: [r3(a[0]), r3(a[1])], b: [r3(b[0]), r3(b[1])],
+          });
+          added++;
+          continue;
+        }
+      }
+
+      // Closed curve equidistant from its centroid → reference circle
+      if (samePt(a, b) && uv.length > 4) {
+        let cx = 0, cy = 0;
+        for (let i = 0; i < uv.length - 1; i++) { cx += uv[i][0]; cy += uv[i][1]; }
+        const c = [cx / (uv.length - 1), cy / (uv.length - 1)];
+        let rMin = Infinity, rMax = 0;
+        for (const p of uv) {
+          const r = dist2(p, c);
+          rMin = Math.min(rMin, r); rMax = Math.max(rMax, r);
+        }
+        if (rMax - rMin < Math.max(0.02, rMax * 0.01)) {
+          this.entities.push({
+            id: this._nextId++, type: 'circle', ref: true,
+            c: [r3(c[0]), r3(c[1])], r: r3((rMin + rMax) / 2),
+          });
+          added++;
+        }
+      }
+    }
+  }
+
+  // =====================================================================
   //  Static overlay (plane grid + origin marker)
   // =====================================================================
 
   _buildStaticOverlay() {
-    const grid = new THREE.GridHelper(500, 50, 0x4CAF50, 0x888888);
-    grid.material.transparent = true;
-    grid.material.opacity = 0.12;
-    this._def.orientGrid(grid);
+    // Grid aligned to the plane's own basis, centered on its origin — so a
+    // baked face plane gets the same square-on grid a cardinal plane does.
+    const mk = (a, b) => this._def.toThree(a, b);
+    const half = 250, step = 10;
+    const gridPts = [];
+    for (let i = -half; i <= half; i += step) {
+      gridPts.push(mk(i, -half), mk(i, half), mk(-half, i), mk(half, i));
+    }
+    const grid = new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(gridPts),
+      new THREE.LineBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.12 }));
     this._staticGroup.add(grid);
 
     // Origin cross in the sketch plane
-    const mk = (a, b) => this._def.toThree(a, b);
     const geo = new THREE.BufferGeometry().setFromPoints([mk(-4, 0), mk(4, 0), mk(0, -4), mk(0, 4)]);
     const cross = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
       color: COLOR_ACCENT, transparent: true, opacity: 0.9, depthTest: false,
@@ -926,7 +1157,7 @@ class SketchMode {
       -((e.clientY - rect.top) / rect.height) * 2 + 1
     );
     this._raycaster.setFromCamera(ndc, env.camera);
-    const plane = new THREE.Plane(this._def.normal, 0);
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(this._def.normal, this._def.origin3);
     const out = new THREE.Vector3();
     if (!this._raycaster.ray.intersectPlane(plane, out)) { return null; }
     return this._def.fromThree(out);
@@ -952,6 +1183,17 @@ class SketchMode {
     const tol = this._pixelWorld(10);
     const candidates = [{ p: [0, 0], ref: null }];
     for (const ent of this.entities) {
+      if (ent.ref) {
+        // Reference geometry snaps by POSITION only (copies, never the
+        // shared array — refs are locked and must stay independent)
+        if (ent.type === 'line') {
+          candidates.push({ p: [...ent.a], ref: null }, { p: [...ent.b], ref: null },
+                          { p: lerp2(ent.a, ent.b, 0.5), ref: null });
+        } else {
+          candidates.push({ p: [...ent.c], ref: null });
+        }
+        continue;
+      }
       if (ent.type === 'line') { candidates.push({ p: ent.a, ref: ent.a }, { p: ent.b, ref: ent.b }); }
       else if (ent.type === 'circle') { candidates.push({ p: ent.c, ref: ent.c }); }
       else if (ent.type === 'arc') {
@@ -1094,8 +1336,11 @@ class SketchMode {
         }
       }
     } else if (id === 'horizontal' || id === 'vertical') {
-      if (!lines.length) { return need('Select a line first'); }
-      for (const l of lines) { toAdd.push({ type: id, entId: l.id }); }
+      const own = lines.filter(l => !l.ref);
+      if (!own.length) {
+        return need(lines.length ? 'That is reference geometry — it can\'t be constrained directly' : 'Select a line first');
+      }
+      for (const l of own) { toAdd.push({ type: id, entId: l.id }); }
     } else if (id === 'parallel' || id === 'perp') {
       if (lines.length !== 2) { return need((id === 'perp' ? 'Perpendicular' : 'Parallel') + ' needs two lines — Shift-click the second one'); }
       toAdd.push({ type: id, aId: lines[0].id, bId: lines[1].id });
@@ -1117,6 +1362,12 @@ class SketchMode {
     }
 
     if (toAdd.length) {
+      const bothRef = toAdd.find(c => {
+        const A = c.aId !== undefined ? this._ent(c.aId) : null;
+        const B = c.bId !== undefined ? this._ent(c.bId) : null;
+        return A && B && A.ref && B.ref;
+      });
+      if (bothRef) { return need('Both of those are reference geometry — nothing can move'); }
       const fresh = toAdd.filter(c => !this._findConstraint(c));
       if (!fresh.length) { return need('Already related'); }
       const conflict = fresh.find(c => this._hvConflict(c));
@@ -1152,6 +1403,11 @@ class SketchMode {
       if (c.type !== 'anchor') { continue; }
       const p = this._ptById(c.ptId);
       if (p && !locked.has(p)) { p[0] = c.at[0]; p[1] = c.at[1]; locked.add(p); }
+    }
+    // Reference geometry (projected model edges) never moves
+    for (const e of this.entities) {
+      if (!e.ref) { continue; }
+      for (const p of this._entPts(e)) { locked.add(p); }
     }
     const w = (p) => (locked.has(p) ? 0 : 1);
 
@@ -1268,6 +1524,21 @@ class SketchMode {
         return { d: Math.abs(d), dir: d >= 0 ? nu : scale2(nu, -1) };
       }
     }
+    // One line + one circle/arc → perpendicular distance from the center to
+    // the (infinite) line — the natural "place this hole off that edge" dim
+    const ln = A.type === 'line' ? A : (B.type === 'line' ? B : null);
+    const ci = A.type !== 'line' ? A : (B.type !== 'line' ? B : null);
+    if (ln && ci && mode !== 'center') { // 'perp' or undecided
+      const u = sub2(ln.b, ln.a);
+      const L = len2(u);
+      if (L > 1e-12) {
+        const nu = [-u[1] / L, u[0] / L];
+        const d = dot2(sub2(ci.c, ln.a), nu);      // signed line → center
+        let dir = d >= 0 ? nu : scale2(nu, -1);    // toward the center...
+        if (ci === A) { dir = scale2(dir, -1); }   // ...flipped so dir runs A → B
+        return { d: Math.abs(d), dir };
+      }
+    }
     if (mode === 'perp') { return null; } // degenerate line
     const delta = sub2(mid(B), mid(A));
     const d = len2(delta);
@@ -1306,13 +1577,17 @@ class SketchMode {
           const dimA = this._dimValueFor(A.id, 'length'), dimB = this._dimValueFor(B.id, 'length');
           const t = dimA !== null ? dimA
             : dimB !== null ? dimB
+            : A.ref ? dist2(A.a, A.b)   // a reference sets the target, never moves
+            : B.ref ? dist2(B.a, B.b)
             : (dist2(A.a, A.b) + dist2(B.a, B.b)) / 2;
           this._setLineLen(A, t, w);
           this._setLineLen(B, t, w);
         } else if (A.type !== 'line' && B.type !== 'line') {
           const dimA = this._dimValueFor(A.id, 'radius'), dimB = this._dimValueFor(B.id, 'radius');
-          const t = dimA !== null ? dimA : dimB !== null ? dimB : (A.r + B.r) / 2;
-          A.r = t; B.r = t;
+          const t = dimA !== null ? dimA : dimB !== null ? dimB
+            : A.ref ? A.r : B.ref ? B.r : (A.r + B.r) / 2;
+          if (!A.ref) { A.r = t; }
+          if (!B.ref) { B.r = t; }
         }
         return;
       }
@@ -1340,7 +1615,8 @@ class SketchMode {
           const tot = wc + mL;
           if (!tot) {
             // Everything pinned — let the radius absorb it unless dimensioned
-            if (this._dimValueFor(circ.id, 'radius') === null) { circ.r = Math.abs(d); }
+            // (or the circle is reference geometry, which never changes)
+            if (!circ.ref && this._dimValueFor(circ.id, 'radius') === null) { circ.r = Math.abs(d); }
             return;
           }
           const dc = err * (wc / tot), dl = mL ? err * (mL / tot) : 0;
@@ -1462,6 +1738,10 @@ class SketchMode {
     }
     const names = [];
     const push = (n) => { if (!names.includes(n)) { names.push(n); } };
+    for (const id of entIds) {
+      const e = this._ent(id);
+      if (e && e.ref) { push('the fixed model edge'); }
+    }
     for (const k of this.constraints) {
       if (k === c || k.id === c.id) { continue; }
       if (k.type === 'anchor') {
@@ -1636,7 +1916,9 @@ class SketchMode {
     const hit = this._hitEntity(raw);
     if (hit) {
       this._updateSel({ kind: 'ent', id: hit.ent.id }, e.shiftKey);
-      this._dragCand = { kind: 'ent', id: hit.ent.id, start: raw, moved: false };
+      // Reference geometry is selectable (for relations/dimensions) but fixed
+      this._dragCand = hit.ent.ref ? null
+        : { kind: 'ent', id: hit.ent.id, start: raw, moved: false };
       this._renderEntities();
       return;
     }
@@ -1857,7 +2139,8 @@ class SketchMode {
       this._renderPreview();
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && this.tool === 'select' && this._sel.length) {
       this._pushUndo();
-      const entIds = this._sel.filter(s => s.kind === 'ent').map(s => s.id);
+      const entIds = this._sel.filter(s => s.kind === 'ent').map(s => s.id)
+        .filter(id => { const en = this._ent(id); return !(en && en.ref); });
       const conIds = new Set(this._sel.filter(s => s.kind === 'con').map(s => s.id));
       // "deleting" a selected point removes its anchor (the point itself
       // belongs to whatever entities use it)
@@ -1896,10 +2179,13 @@ class SketchMode {
   // =====================================================================
 
   /** Serialize with point topology: entities store point ids, not coords,
-   *  so restoring keeps endpoints shared. */
+   *  so restoring keeps endpoints shared. Reference geometry is static
+   *  session furniture (its points aren't registered) — it is excluded here
+   *  and carried across restores unchanged, keeping its ids stable for any
+   *  constraints that mention it. */
   _serialize() {
     const idOf = new Map(this.points.map(r => [r.p, r.id]));
-    const ents = this.entities.map(e => {
+    const ents = this.entities.filter(e => !e.ref).map(e => {
       const o = { ...e };
       if (e.type === 'line') { o.a = idOf.get(e.a); o.b = idOf.get(e.b); }
       else { o.c = idOf.get(e.c); }
@@ -1914,18 +2200,19 @@ class SketchMode {
 
   _restoreState(json) {
     const s = JSON.parse(json);
+    const refs = this.entities.filter(e => e.ref);
     const byId = new Map();
     this.points = s.points.map(r => {
       const rec = { id: r.id, p: [r.p[0], r.p[1]] };
       byId.set(r.id, rec.p);
       return rec;
     });
-    this.entities = s.ents.map(e => {
+    this.entities = [...refs, ...s.ents.map(e => {
       const o = { ...e };
       if (e.type === 'line') { o.a = byId.get(e.a); o.b = byId.get(e.b); }
       else { o.c = byId.get(e.c); }
       return o;
-    });
+    })];
     this.constraints = s.cons;
   }
 
@@ -1980,7 +2267,7 @@ class SketchMode {
   _cutsOnLine(ent) {
     const ts = [];
     for (const o of this.entities) {
-      if (o.id === ent.id) { continue; }
+      if (o.id === ent.id || o.ref) { continue; }
       if (o.type === 'line') {
         const t = segSegT(ent.a, ent.b, o.a, o.b);
         if (t !== null && t > 1e-9 && t < 1 - 1e-9) { ts.push(t); }
@@ -2003,7 +2290,7 @@ class SketchMode {
   _cutsOnCircle(ent) {
     const angles = [];
     for (const o of this.entities) {
-      if (o.id === ent.id) { continue; }
+      if (o.id === ent.id || o.ref) { continue; }
       if (o.type === 'line') {
         for (const t of segCircleTs(o.a, o.b, ent.c, ent.r)) {
           if (t < -1e-9 || t > 1 + 1e-9) { continue; }
@@ -2028,7 +2315,7 @@ class SketchMode {
   /** The removable piece under the cursor → descriptor for preview/apply. */
   _trimPieceAt(pt) {
     const hit = this._hitEntity(pt);
-    if (!hit) { return null; }
+    if (!hit || hit.ent.ref) { return null; } // reference geometry can't trim
     const ent = hit.ent;
 
     if (ent.type === 'line') {
@@ -2135,6 +2422,11 @@ class SketchMode {
     }
     this._closeDimBox();
     if (!hit) { this._renderEntities(); return; }
+    if (hit.ent.ref) {
+      // A reference can only be the SECOND element (its own size is fixed)
+      this._floatMsg('reference — pick your sketch element first, then this edge', 'info');
+      return;
+    }
 
     const info = this._dimInfo(hit.ent.id, null);
     if (!info) { return; }
@@ -2169,6 +2461,11 @@ class SketchMode {
         const d = dot2(sub2(anchor(B), anchor(A)), nUnit);
         return { kind: 'distance', value: Math.abs(d), dir: d >= 0 ? nUnit : scale2(nUnit, -1), aId, bId, mode: 'perp' };
       }
+    }
+    // Line + circle/arc → perpendicular distance from the center to the line
+    if ((A.type === 'line') !== (B.type === 'line')) {
+      const g = this._pairDistGeom(A, B, 'perp');
+      if (g) { return { kind: 'distance', value: g.d, dir: g.dir, aId, bId, mode: 'perp' }; }
     }
     const delta = sub2(anchor(B), anchor(A));
     const d = len2(delta);
@@ -2294,6 +2591,20 @@ class SketchMode {
     return line;
   }
 
+  /** Dashed line for reference geometry (dash length tracks zoom). */
+  _makeDashedLine(points, color, opacity = 1) {
+    const geo = new THREE.BufferGeometry().setFromPoints(points);
+    const dash = this._pixelWorld(6);
+    const mat = new THREE.LineDashedMaterial({
+      color, transparent: true, opacity, depthTest: false,
+      dashSize: dash, gapSize: dash * 0.7,
+    });
+    const line = new THREE.Line(geo, mat);
+    line.computeLineDistances();
+    line.renderOrder = 998;
+    return line;
+  }
+
   _entityPoints(ent) {
     const def = this._def;
     if (ent.type === 'line') { return [def.toThree(...ent.a), def.toThree(...ent.b)]; }
@@ -2363,7 +2674,12 @@ class SketchMode {
     for (const ent of this.entities) {
       const isSel = selEnts.has(ent.id) ||
         (this._dim && (ent.id === this._dim.aId || ent.id === this._dim.bId));
-      this._entityGroup.add(this._makeLine(this._entityPoints(ent), isSel ? COLOR_ACCENT : COLOR_ENTITY));
+      if (ent.ref) {
+        this._entityGroup.add(this._makeDashedLine(this._entityPoints(ent),
+          isSel ? COLOR_ACCENT : 0x9e9e9e, isSel ? 0.95 : 0.5));
+      } else {
+        this._entityGroup.add(this._makeLine(this._entityPoints(ent), isSel ? COLOR_ACCENT : COLOR_ENTITY));
+      }
     }
 
     // Endpoint/center markers (selectable, draggable)
@@ -2502,9 +2818,10 @@ class SketchMode {
   //  Code emission
   // =====================================================================
 
-  /** Group line/arc entities into connected chains (ordered segment walks). */
+  /** Group line/arc entities into connected chains (ordered segment walks).
+   *  Reference geometry never emits. */
   _buildChains() {
-    const segs = this.entities.filter(e => e.type === 'line' || e.type === 'arc');
+    const segs = this.entities.filter(e => !e.ref && (e.type === 'line' || e.type === 'arc'));
     const key = (p) => p[0].toFixed(3) + ',' + p[1].toFixed(3);
     const ends = (e) => e.type === 'line' ? [e.a, e.b] : [arcPt(e, e.a0), arcPt(e, e.a1)];
 
@@ -2614,10 +2931,21 @@ class SketchMode {
   }
 
   _emitCode() {
-    const planeArg = this.plane === 'XY' ? '' : `, '${this.plane}'`;
+    const def = this._def;
+    const vec = (v) => `[${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])}]`;
+    let planeArg, header;
+    if (def.key) {
+      planeArg = def.key === 'XY' ? '' : `, '${def.key}'`;
+      header = `// --- Sketch (${def.key} plane) ---`;
+    } else {
+      // Baked face plane: origin + normal + xDir are literals, so the sketch
+      // stays put even if the underlying body later changes (code is the artifact).
+      planeArg = `, { origin: ${vec(def.occOrigin)}, normal: ${vec(def.occNormal)}, xDir: ${vec(def.occX)} }`;
+      header = `// --- Sketch (on face @ ${vec(def.occOrigin)}) ---`;
+    }
     const existing = this._app.editor.getCode();
     const out = [];
-    out.push(`// --- Sketch (${this.plane} plane) ---`);
+    out.push(header);
 
     // Named dimensions become variables; length/radius dims bind the emitted
     // literal to the variable name
@@ -2642,7 +2970,7 @@ class SketchMode {
     }
 
     const chains = this._buildChains();
-    const circles = this.entities.filter(e => e.type === 'circle');
+    const circles = this.entities.filter(e => e.type === 'circle' && !e.ref);
 
     // Circles inside a closed chain become holes of that chain's face
     const holesByChain = new Map();

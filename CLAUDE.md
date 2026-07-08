@@ -219,7 +219,27 @@ let profile = new Sketch([0, 0])
 Revolve(profile, 360);  // Produces a flat disk!
 ```
 
-Supported planes: `'XY'` (default), `'XZ'`, `'YZ'`.
+Supported planes: `'XY'` (default), `'XZ'`, `'YZ'`, or a baked arbitrary plane
+`{ origin, normal, xDir? }` (sketch-on-face): sketch `(a, b)` maps to
+`origin + a*xDir + b*(normal×xDir)`. Pair with the scalar `Extrude(face, dist)`
+overload, which extrudes along the face's own normal (negative = into the body):
+
+```javascript
+let s = new Sketch([0, 0], { origin: [0, 0, 10], normal: [0, 0, 1], xDir: [1, 0, 0] })
+  .Circle([0, 0], 8).Face();
+let hole = Extrude(s, -12);   // scalar: 12 units into the body
+```
+
+**Boolean tools from face sketches should overshoot the surface.** Baked-plane
+literals are never exactly on the face, so a tool that starts right at the
+surface leaves a near-coplanar sliver (renders as z-fighting). Use the span
+form `Extrude(face, [start, end])` — extrudes along the normal from `start`
+to `end`:
+
+```javascript
+Difference(body, [Extrude(s, [0.5, -12])]);  // cut: starts 0.5 proud, cuts 12 deep
+Union([body, Extrude(s, [-0.5, 20])]);       // boss: root buried 0.5, rises 20
+```
 
 ### 13. Null Shape Cascading Errors
 

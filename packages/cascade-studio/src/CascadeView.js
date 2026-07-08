@@ -55,8 +55,17 @@ class Environment {
     this.renderer.shadowMap.enabled    = true;
     this.renderer.shadowMap.type       = THREE.PCFSoftShadowMap;
 
-    // Set up the orbit controls
+    // Set up the orbit controls, Blender-style: middle-mouse orbits,
+    // Shift+middle pans (OrbitControls flips ROTATE→PAN on shift/ctrl/meta
+    // itself), wheel zooms. Left is reserved for selection and sketching;
+    // right-drag pans as a bonus (and stays available while sketching,
+    // where rotate is disabled).
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.mouseButtons = {
+      LEFT: null,
+      MIDDLE: THREE.MOUSE.ROTATE,
+      RIGHT: THREE.MOUSE.PAN,
+    };
     this.controls.target.set(0, 45, 0);
     this.controls.panSpeed  = 2;
     this.controls.zoomSpeed = 1;
@@ -310,6 +319,89 @@ class CascadeEnvironment {
     this.environment.renderer.render(this.environment.scene, camera);
   }
 
+  /** Blender-style view presets (numpad 7/1/3 + Shift): swing the camera to
+   *  an axis view at its current distance. Directions are Three world axes;
+   *  in OCC terms top looks down -Z, front looks from -Y, right from +X. */
+  setViewPreset(name) {
+    const VIEWS = {
+      top:    { dir: [0, 1, 0],  up: [0, 0, -1] },
+      bottom: { dir: [0, -1, 0], up: [0, 0, -1] },  // X mirrors, like Blender
+      front:  { dir: [0, 0, 1],  up: [0, 1, 0] },
+      back:   { dir: [0, 0, -1], up: [0, 1, 0] },
+      right:  { dir: [1, 0, 0],  up: [0, 1, 0] },
+      left:   { dir: [-1, 0, 0], up: [0, 1, 0] },
+    };
+    const v = VIEWS[name];
+    if (!v) { return; }
+    const env = this.environment;
+    const cam = env.camera, ctl = env.controls;
+    const target = ctl.target.clone();
+    const dist = cam.position.distanceTo(target) || 100;
+
+    // Tween the view DIRECTION (slerp), not the position — a straight
+    // position lerp between opposite views passes through the target and
+    // makes lookAt degenerate at the midpoint.
+    const d0 = cam.position.clone().sub(target).normalize();
+    if (d0.lengthSq() < 0.5) { d0.set(0, 0, 1); }
+    const d1 = new THREE.Vector3(...v.dir);
+    const up0 = cam.up.clone(), up1 = new THREE.Vector3(...v.up);
+    const qFull = new THREE.Quaternion().setFromUnitVectors(d0, d1);
+    const qNone = new THREE.Quaternion();
+
+    const gen = this._viewTweenGen = (this._viewTweenGen || 0) + 1;
+    const dur = 200, start = performance.now();
+    const step = (now) => {
+      if (this._viewTweenGen !== gen) { return; } // superseded by a newer move
+      let k = Math.min(1, (now - start) / dur);
+      k = k * k * (3 - 2 * k); // smoothstep
+      const q = qNone.clone().slerp(qFull, k);
+      cam.position.copy(target).addScaledVector(d0.clone().applyQuaternion(q), dist);
+      cam.up.lerpVectors(up0, up1, k).normalize();
+      cam.lookAt(target);
+      env.viewDirty = true;
+      if (k < 1) { requestAnimationFrame(step); } else { ctl.update(); }
+    };
+    requestAnimationFrame(step);
+  }
+
+  /** Blender-style perspective toggle (numpad 5): swap between perspective
+   *  and orthographic projection, preserving the apparent framing. */
+  togglePerspective() {
+    const env = this.environment;
+    if (env.camera.isOrthographicCamera) {
+      const ortho = env.camera, persp = this._savedPerspective;
+      if (!persp) { return; } // ortho owned by someone else (e.g. sketch mode)
+      this._savedPerspective = null;
+      const target = env.controls.target;
+      const halfH = (ortho.top - ortho.bottom) / 2 / ortho.zoom;
+      const dist = halfH / Math.tan(persp.fov * Math.PI / 360);
+      const dir = ortho.position.clone().sub(target);
+      if (dir.lengthSq() < 1e-9) { dir.set(0, 0, 1); } else { dir.normalize(); }
+      persp.position.copy(target).addScaledVector(dir, dist);
+      persp.up.copy(ortho.up);
+      persp.lookAt(target);
+      env.camera = persp;
+      env.controls.object = persp;
+    } else {
+      const persp = env.camera;
+      const canvas = env.renderer.domElement;
+      const aspect = (canvas.clientWidth || 1) / (canvas.clientHeight || 1);
+      const dist = persp.position.distanceTo(env.controls.target);
+      const halfH = dist * Math.tan(persp.fov * Math.PI / 360);
+      const ortho = new THREE.OrthographicCamera(
+        -halfH * aspect, halfH * aspect, halfH, -halfH, -5000, 5000
+      );
+      ortho.position.copy(persp.position);
+      ortho.up.copy(persp.up);
+      ortho.lookAt(env.controls.target);
+      this._savedPerspective = persp;
+      env.camera = ortho;
+      env.controls.object = ortho;
+    }
+    env.controls.update();
+    env.viewDirty = true;
+  }
+
   /** Build a THREE.Group from facelist/edgelist mesh data. */
   _buildObjectFromMesh(facelist, edgelist) {
     let group = new THREE.Group();
@@ -521,6 +613,79 @@ class CascadeEnvironment {
     if (hash === null || hash === undefined) { return null; }
     const step = this._historySteps.find(s => (s.hashes || []).includes(hash));
     return { hash, definingLine: (step && step.lineNumber >= 1) ? step.lineNumber : -1 };
+  }
+
+  /** Pick a flat model face under the mouse for sketch-on-face. Returns the
+   *  baked plane in OCC space { origin, normal } (mesh vertices are stored in
+   *  OCC coords), the ray distance, and the face's triangles in world space
+   *  for a hover highlight — or null if nothing/curved is under the cursor. */
+  pickFaceAt(event) {
+    if (!this.mainObject) { return null; }
+    const canvas = this.environment.renderer.domElement;
+    const rect = canvas.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    this.raycaster.setFromCamera(ndc, this.environment.camera);
+    const hits = this.raycaster.intersectObject(this.mainObject, true);
+    const hit = hits.find(h => h.object.name === "Model Faces");
+    if (!hit || !hit.face) { return null; }
+
+    const geom = hit.object.geometry;
+    const col = geom.getAttribute('color');
+    const pos = geom.getAttribute('position');
+    const nrm = geom.getAttribute('normal');
+    if (!col || !pos || !nrm) { return null; }
+    const gfi = col.getY(hit.face.a); // global face index packed into color.y
+
+    // Centroid + averaged normal over this face's vertices (OCC space)
+    let cx = 0, cy = 0, cz = 0, nx = 0, ny = 0, nz = 0, count = 0;
+    for (let i = 0; i < pos.count; i++) {
+      if (col.getY(i) !== gfi) { continue; }
+      cx += pos.getX(i); cy += pos.getY(i); cz += pos.getZ(i);
+      nx += nrm.getX(i); ny += nrm.getY(i); nz += nrm.getZ(i);
+      count++;
+    }
+    if (!count) { return null; }
+    let origin = [cx / count, cy / count, cz / count];
+    const nLen = Math.hypot(nx, ny, nz);
+    if (nLen < 1e-9) { return null; }
+    let normal = [nx / nLen, ny / nLen, nz / nLen];
+
+    // Planarity check: reject curved faces (a cylinder side is one "face")
+    let maxDev = 0, extent = 0;
+    for (let i = 0; i < pos.count; i++) {
+      if (col.getY(i) !== gfi) { continue; }
+      const dx = pos.getX(i) - origin[0], dy = pos.getY(i) - origin[1], dz = pos.getZ(i) - origin[2];
+      maxDev = Math.max(maxDev, Math.abs(dx * normal[0] + dy * normal[1] + dz * normal[2]));
+      extent = Math.max(extent, Math.hypot(dx, dy, dz));
+    }
+    if (maxDev > Math.max(0.05, extent * 0.02)) { return null; } // not flat
+
+    // Snap the origin to clean numbers, then re-project onto the plane so it
+    // stays exactly coplanar (the emitted literal reads cleanly).
+    const r = (v) => Math.round(v * 100) / 100;
+    const ro = [r(origin[0]), r(origin[1]), r(origin[2])];
+    const off = (ro[0] - origin[0]) * normal[0] + (ro[1] - origin[1]) * normal[1] + (ro[2] - origin[2]) * normal[2];
+    origin = [ro[0] - off * normal[0], ro[1] - off * normal[1], ro[2] - off * normal[2]];
+
+    // Face triangles in world space, for the hover highlight overlay
+    this.mainObject.updateMatrixWorld(true);
+    const mw = hit.object.matrixWorld;
+    const worldTris = [];
+    const idx = geom.index;
+    if (idx) {
+      for (let t = 0; t < idx.count; t += 3) {
+        const a = idx.getX(t);
+        if (col.getY(a) !== gfi) { continue; }
+        for (const vi of [a, idx.getX(t + 1), idx.getX(t + 2)]) {
+          worldTris.push(new THREE.Vector3().fromBufferAttribute(pos, vi).applyMatrix4(mw));
+        }
+      }
+    }
+
+    return { origin, normal, distance: hit.distance, worldTris };
   }
 
   /** Raycast a click against the model; jump the editor to the line whose op

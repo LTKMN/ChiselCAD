@@ -593,9 +593,35 @@ function Intersection(objectsToIntersect, keepObjects, fuzzValue, keepEdges) {
 
 function Extrude(face, direction, keepFace) {
   if (!face || face.IsNull()) { console.error("Extrude: input shape is null! Was it consumed by a previous operation? Use keepFace/keepShape to preserve shapes for reuse."); return face; }
+  // Scalar distance → extrude along the face's own normal (handy for sketches
+  // on tilted/baked planes, where a literal direction vector would be
+  // illegible). Negative distance extrudes into the body.
+  //
+  // Span [start, end] → extrude along the normal from start to end. This is
+  // the robust idiom for boolean tools whose sketch sits on a body face:
+  // baked-plane literals are never EXACTLY on the face, and a tool that
+  // begins right at the surface leaves a near-coplanar sliver (renders as
+  // z-fighting). Overshooting sidesteps the tangency entirely:
+  //   Extrude(sk, [0.5, -12])   cut tool: starts 0.5 proud, cuts 12 deep
+  //   Extrude(sk, [-0.5, 20])   boss: root buried 0.5, rises 20
+  let dir = direction, startVec = null;
+  if (typeof direction === 'number' ||
+      (self.isArrayLike(direction) && direction.length === 2)) {
+    let n = _faceNormal(face);
+    let start = typeof direction === 'number' ? 0 : direction[0];
+    let end = typeof direction === 'number' ? direction : direction[1];
+    dir = [n[0] * (end - start), n[1] * (end - start), n[2] * (end - start)];
+    if (start !== 0) { startVec = [n[0] * start, n[1] * start, n[2] * start]; }
+  }
   let curExtrusion = self.CacheOp(arguments, "Extrude", () => {
-    return new self.oc.BRepPrimAPI_MakePrism_1(face,
-      new self.oc.gp_Vec_4(direction[0], direction[1], direction[2]), false, true).Shape();
+    let base = face;
+    if (startVec) {
+      let trsf = new self.oc.gp_Trsf_1();
+      trsf.SetTranslation_1(new self.oc.gp_Vec_4(startVec[0], startVec[1], startVec[2]));
+      base = face.Moved(new self.oc.TopLoc_Location_4(trsf), false);
+    }
+    return new self.oc.BRepPrimAPI_MakePrism_1(base,
+      new self.oc.gp_Vec_4(dir[0], dir[1], dir[2]), false, true).Shape();
   });
 
   if (!keepFace) { self.sceneShapes = self.Remove(self.sceneShapes, face); }
@@ -819,23 +845,54 @@ function Sketch(startingPoint, plane) {
   this.fillets      = [];
   this.argsString   = self.ComputeHash(arguments, true);
 
-  // Plane support: 'XY' (default), 'XZ', 'YZ'
-  this._plane = (typeof plane === 'string') ? plane.toUpperCase() : 'XY';
-  this._toPnt = function (a, b) {
-    if (this._plane === 'XZ') return new self.oc.gp_Pnt_3(a, 0, b);
-    if (this._plane === 'YZ') return new self.oc.gp_Pnt_3(0, a, b);
-    return new self.oc.gp_Pnt_3(a, b, 0);
-  };
-  this._getAB = function (pnt) {
-    if (this._plane === 'XZ') return [pnt.X(), pnt.Z()];
-    if (this._plane === 'YZ') return [pnt.Y(), pnt.Z()];
-    return [pnt.X(), pnt.Y()];
-  };
-  this._normal = function () {
-    if (this._plane === 'XZ') return new self.oc.gp_Dir_5(0, 1, 0);
-    if (this._plane === 'YZ') return new self.oc.gp_Dir_5(1, 0, 0);
-    return new self.oc.gp_Dir_5(0, 0, 1);
-  };
+  // Plane support: cardinal 'XY' (default) / 'XZ' / 'YZ', or a baked arbitrary
+  // plane object { origin, normal, xDir } (from sketch-on-face). The cardinal
+  // string branches are kept exactly as-is: they place points directly in 3D
+  // as drawn, and existing models depend on that geometry.
+  if (plane && typeof plane === 'object') {
+    // Arbitrary plane: build an orthonormal frame (X, Y, N) at origin O and
+    // place sketch points directly at O + a*X + b*Y — same "no post-transform"
+    // approach as the cardinal branches, just with a general basis.
+    this._plane = 'CUSTOM';
+    let O = plane.origin || [0, 0, 0];
+    let N = _normalize(plane.normal);
+    // xDir is orthogonalized against N so a slightly-off input still gives a
+    // clean frame; fall back to a sensible in-plane direction if absent.
+    let X = plane.xDir ? plane.xDir.slice()
+      : (Math.abs(N[2]) < 0.99 ? [-N[1], N[0], 0] : [1, 0, 0]);
+    let dxn = _dot(X, N);
+    X = _normalize([X[0] - dxn * N[0], X[1] - dxn * N[1], X[2] - dxn * N[2]]);
+    let Y = [N[1] * X[2] - N[2] * X[1], N[2] * X[0] - N[0] * X[2], N[0] * X[1] - N[1] * X[0]]; // N × X
+    this._planeFrame = { O, X, Y, N };
+    this._toPnt = function (a, b) {
+      return new self.oc.gp_Pnt_3(
+        O[0] + a * X[0] + b * Y[0],
+        O[1] + a * X[1] + b * Y[1],
+        O[2] + a * X[2] + b * Y[2]);
+    };
+    this._getAB = function (pnt) {
+      let d = [pnt.X() - O[0], pnt.Y() - O[1], pnt.Z() - O[2]];
+      return [_dot(d, X), _dot(d, Y)];
+    };
+    this._normal = function () { return new self.oc.gp_Dir_5(N[0], N[1], N[2]); };
+  } else {
+    this._plane = (typeof plane === 'string') ? plane.toUpperCase() : 'XY';
+    this._toPnt = function (a, b) {
+      if (this._plane === 'XZ') return new self.oc.gp_Pnt_3(a, 0, b);
+      if (this._plane === 'YZ') return new self.oc.gp_Pnt_3(0, a, b);
+      return new self.oc.gp_Pnt_3(a, b, 0);
+    };
+    this._getAB = function (pnt) {
+      if (this._plane === 'XZ') return [pnt.X(), pnt.Z()];
+      if (this._plane === 'YZ') return [pnt.Y(), pnt.Z()];
+      return [pnt.X(), pnt.Y()];
+    };
+    this._normal = function () {
+      if (this._plane === 'XZ') return new self.oc.gp_Dir_5(0, 1, 0);
+      if (this._plane === 'YZ') return new self.oc.gp_Dir_5(1, 0, 0);
+      return new self.oc.gp_Dir_5(0, 0, 1);
+    };
+  }
 
   this.firstPoint   = this._toPnt(startingPoint[0], startingPoint[1]);
   this.lastPoint    = this.firstPoint;

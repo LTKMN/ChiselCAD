@@ -91,6 +91,44 @@ class CascadeStudioApp {
     window.loadFiles = (id) => this.loadFiles(id);
     window.clearExternalFiles = () => this.clearExternalFiles();
 
+    // Blender-style viewport hotkeys:
+    //   N            toggle the floating CAD control panel (sidebar key)
+    //   7/1/3        top / front / right view (Shift = bottom / back / left)
+    //   5            perspective ↔ orthographic
+    // Routing is Blender-like: hovering the 3D canvas claims the keys even
+    // while Monaco holds focus (click-to-code focuses the editor, which would
+    // otherwise swallow every key after clicking a shape). Typing in a real
+    // input/select always wins. View keys match both the number row and the
+    // numpad (via e.code, since e.key for Shift+1 is '!'), and are disabled
+    // while sketching — sketch mode owns the camera there.
+    this._guiPanelHidden = false;
+    window.addEventListener('keydown', (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) { return; }
+      const t = e.target;
+      const inMonaco = !!(t && t.closest && t.closest('.monaco-editor'));
+      if (t && !inMonaco && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) { return; }
+      const canvas = this.viewport && this.viewport.environment
+        && this.viewport.environment.renderer.domElement;
+      if (inMonaco && !(canvas && canvas.matches(':hover'))) { return; } // actually typing code
+      if (e.key.toLowerCase() === 'n') {
+        this._guiPanelHidden = !this._guiPanelHidden;
+        const panel = document.getElementById('guiPanel');
+        if (panel) { panel.style.display = this._guiPanelHidden ? 'none' : ''; }
+        e.preventDefault(); // don't also type into the editor
+        return;
+      }
+
+      if (!this.viewport || (this.sketchMode && this.sketchMode.active)) { return; }
+      const digit = (e.code.match(/^(?:Digit|Numpad)([1357])$/) || [])[1];
+      if (!digit) { return; }
+      if (digit === '7') { this.viewport.setViewPreset(e.shiftKey ? 'bottom' : 'top'); }
+      else if (digit === '1') { this.viewport.setViewPreset(e.shiftKey ? 'back' : 'front'); }
+      else if (digit === '3') { this.viewport.setViewPreset(e.shiftKey ? 'left' : 'right'); }
+      else if (digit === '5' && !e.shiftKey) { this.viewport.togglePerspective(); }
+      else { return; }
+      e.preventDefault(); // claimed by the viewport — don't type into the editor
+    });
+
     // Install the programmatic API
     this.api = new CascadeAPI(this);
     this.api.install();
@@ -101,25 +139,9 @@ class CascadeStudioApp {
     // Register OpenSCAD language with Monaco (for syntax highlighting)
     this._openscadMonaco.registerLanguage();
 
-    // Mode toggle handler — save/restore code per mode
+    // Per-mode code stash for switchEditorMode (the mode select lives in the
+    // editor panel's status bar and calls back into switchEditorMode)
     this._savedCode = {};
-    const modeSelect = document.getElementById('editorMode');
-    if (modeSelect) {
-      modeSelect.addEventListener('change', (e) => {
-        const newMode = e.target.value;
-        // Save current code for the current mode
-        this._savedCode[this.editor.mode] = this.editor.getCode();
-        this.editor.setMode(newMode);
-        // Load saved code or starter code for the new mode
-        const starter = newMode === 'openscad'
-          ? CascadeStudioApp.OPENSCAD_STARTER_CODE
-          : CascadeStudioApp.STARTER_CODE;
-        this.editor.setCode(this._savedCode[newMode] || starter);
-        // Re-fit camera and auto-evaluate
-        if (this.viewport) { this.viewport._fitOnNextRender = true; }
-        this.editor.evaluateCode();
-      });
-    }
 
     // Initialize the engine (loads worker + WASM), then start the layout
     this.engine.init().then(() => {
@@ -288,14 +310,14 @@ class CascadeStudioApp {
         position: { referencePanel: 'codeEditor', direction: 'below' }
       });
 
-      // Set proportions after dockview grid initializes
-      setTimeout(() => {
-        try {
-          const h = appBody.offsetHeight;
-          viewPanel.group.api.setSize({ height: Math.floor(h * 0.25) });
-          consolePanel.group.api.setSize({ height: Math.floor(h * 0.05) });
-        } catch (e) { /* ignore */ }
-      }, 50);
+      // Set proportions once the dockview grid is actually ready (the exact
+      // frame varies with panel init time, so retry until the size sticks)
+      this._applyPanelSizes(() => {
+        const h = appBody.offsetHeight;
+        viewPanel.group.api.setSize({ height: Math.floor(h * 0.25) });
+        consolePanel.group.api.setSize({ height: Math.floor(h * 0.05) });
+        return Math.abs(viewPanel.group.height - h * 0.25) < 40;
+      });
     } else {
       // Desktop: editor left, cascadeView right, console below view
       const editorPanel = this._dockviewApi.addPanel({
@@ -320,17 +342,17 @@ class CascadeStudioApp {
         position: { referencePanel: 'cascadeView', direction: 'below' }
       });
 
-      // Set initial proportions (editor ~50%, view+console ~50%, console 15% height)
-      setTimeout(() => {
-        try {
-          const editorGroup = editorPanel.group;
-          const viewGroup = viewPanel.group;
-          if (editorGroup && viewGroup) {
-            editorGroup.api.setSize({ width: Math.floor(appBody.offsetWidth * 0.5) });
-          }
-          consolePanel.group.api.setSize({ height: Math.floor(appBody.offsetHeight * 0.15) });
-        } catch (e) { /* setSize may not be available on initial render */ }
-      }, 50);
+      // Initial proportions: editor ~30% wide, console ~15% tall. Applied
+      // once the dockview grid is actually ready — the exact frame varies
+      // with panel init time, so retry until the size sticks (a one-shot
+      // 50ms timeout silently lost this race and left dockview's 50/50).
+      this._applyPanelSizes(() => {
+        const w = appBody.offsetWidth, h = appBody.offsetHeight;
+        editorPanel.group.api.setSize({ width: Math.floor(w * 0.3) });
+        consolePanel.group.api.setSize({ height: Math.floor(h * 0.15) });
+        return Math.abs(editorPanel.group.width - w * 0.3) < 40 &&
+               Math.abs(consolePanel.group.height - h * 0.15) < 40;
+      });
     }
 
     // Resize the layout when the browser resizes
@@ -347,6 +369,18 @@ class CascadeStudioApp {
     requestAnimationFrame(this._updateLayoutSize);
   }
 
+  /** Apply initial panel proportions, retrying until dockview accepts them.
+   *  `apply` sets the sizes and returns true when they verifiably took. */
+  _applyPanelSizes(apply) {
+    let tries = 0;
+    const tick = () => {
+      let ok = false;
+      try { ok = apply(); } catch (e) { /* groups not ready yet */ }
+      if (!ok && ++tries < 20) { setTimeout(tick, 50); }
+    };
+    setTimeout(tick, 50);
+  }
+
   /** Initialize the Three.js 3D Viewport. */
   _initCascadeView(container, state) {
     this.gui.state = state;
@@ -360,6 +394,8 @@ class CascadeStudioApp {
     let floatingGUIContainer = document.createElement("div");
     floatingGUIContainer.className = 'gui-panel';
     floatingGUIContainer.id = "guiPanel";
+    // The panel is recreated with the viewport — keep the N-key hidden state
+    if (this._guiPanelHidden) { floatingGUIContainer.style.display = 'none'; }
     container.element.appendChild(floatingGUIContainer);
 
     this.viewport = new CascadeEnvironment(
@@ -445,6 +481,22 @@ class CascadeStudioApp {
   clearExternalFiles() {
     this.engine.clearExternalFiles();
     this.console.goldenContainer.setState({});
+  }
+
+  /** Switch the editor language mode (called from the editor panel's
+   *  status-bar select). Stashes the current mode's code so switching
+   *  back restores it. */
+  switchEditorMode(newMode) {
+    if (newMode === this.editor.mode) { return; }
+    this._savedCode[this.editor.mode] = this.editor.getCode();
+    this.editor.setMode(newMode);
+    const starter = newMode === 'openscad'
+      ? CascadeStudioApp.OPENSCAD_STARTER_CODE
+      : CascadeStudioApp.STARTER_CODE;
+    this.editor.setCode(this._savedCode[newMode] || starter);
+    // Re-fit camera and auto-evaluate
+    if (this.viewport) { this.viewport._fitOnNextRender = true; }
+    this.editor.evaluateCode();
   }
 
   /** Extract code from a legacy GoldenLayout project file. */

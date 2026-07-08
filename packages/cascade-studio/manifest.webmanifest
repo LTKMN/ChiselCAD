@@ -1,12 +1,12 @@
 {
-  "name": "Cascade Studio",
-  "short_name": "CascadeStudio",
+  "name": "Chisel CAD",
+  "short_name": "ChiselCAD",
   "start_url": ".",
   "display": "standalone",
   "description": "A fully integrated Scripted CAD Kernel for the browser.",
   "related_applications": [{
     "platform": "github",
-    "url": "https://github.com/zalo/CascadeStudio"
+    "url": "https://github.com/LTKMN/ChiselCAD"
   }],
   "icons": [
     {

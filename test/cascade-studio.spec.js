@@ -79,7 +79,7 @@ test.describe('Application Startup & CascadeAPI', () => {
   test('page loads, CascadeAPI works, capabilities and examples are correct', async ({ page }) => {
     // Page title and meta
     await page.goto('/');
-    await expect(page).toHaveTitle(/Cascade Studio/);
+    await expect(page).toHaveTitle(/Chisel CAD/);
     const meta = await page.locator('meta[name="cascade-api"]').getAttribute('content');
     expect(meta).toBe('window.CascadeAPI');
 

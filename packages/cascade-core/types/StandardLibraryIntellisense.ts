@@ -16,12 +16,15 @@ type integer = number;
 
 /** Starts sketching a 2D shape which can contain lines, arcs, bezier splines, and fillets.
  * @param startingPoint - Starting point as [x, y] in the chosen plane
- * @param plane - Drawing plane: 'XY' (default), 'XZ', or 'YZ'. For revolve profiles use 'XZ'.
+ * @param plane - Drawing plane: 'XY' (default), 'XZ', or 'YZ'; or a baked
+ *   arbitrary plane `{ origin, normal, xDir? }` (OCC coords) for sketch-on-face.
+ *   Sketch (a,b) map to `origin + a*xDir + b*(normal×xDir)`.
  * [Source](https://github.com/zalo/CascadeStudio/blob/master/js/CADWorker/CascadeStudioStandardLibrary.js)
  * @example```let sketch = new Sketch([0,0]).LineTo([100,0]).Fillet(20).LineTo([100,100]).End(true).Face();```
- * @example```let profile = new Sketch([0,0], "XZ").LineTo([15,0]).LineTo([15,10]).LineTo([0,10]).End(true).Face(); Revolve(profile, 360);```*/
+ * @example```let profile = new Sketch([0,0], "XZ").LineTo([15,0]).LineTo([15,10]).LineTo([0,10]).End(true).Face(); Revolve(profile, 360);```
+ * @example```let onFace = new Sketch([0,0], {origin:[0,0,10], normal:[0,0,1], xDir:[1,0,0]}).Circle([0,0],5).Face();```*/
 class Sketch {
-    constructor(startingPoint: number[], plane?: 'XY' | 'XZ' | 'YZ');
+    constructor(startingPoint: number[], plane?: 'XY' | 'XZ' | 'YZ' | { origin: number[], normal: number[], xDir?: number[] });
 
     faces       : oc.TopoDS_Face[];
     wires       : oc.TopoDS_Wire[];
@@ -138,9 +141,17 @@ function RemoveInternalEdges(shape: oc.TopoDS_Shape, keepShape?: boolean) : oc.T
 /** Extrudes a shape along a direction vector. Faces become solids, wires become shells, edges become faces.
  * The original face is consumed unless `keepFace` is true.
  * Use `keepFace=true` when you need to reuse the face (e.g., with `Offset()` to create inner cavities).
+ * A scalar `direction` extrudes along the face's own normal (negative = into
+ * the body) — handy for sketches on tilted/baked planes. A 2-element span
+ * `[start, end]` extrudes along the normal from start to end: the robust form
+ * for boolean tools sketched on a body face (overshoot the surface so no
+ * near-coplanar sliver is left, e.g. `[0.5, -12]` for a cut, `[-0.5, 20]`
+ * for a boss).
  * @example```let box = Extrude(Polygon([[0,0,0],[50,0,0],[25,50,0]]), [0,0,50]);```
- * @example```let tray = Extrude(outerFace, [0,0,30], true);  // keepFace for Offset```*/
-function Extrude(face: oc.TopoDS_Shape, direction: number[], keepFace?: boolean) : oc.TopoDS_Shape;
+ * @example```let tray = Extrude(outerFace, [0,0,30], true);  // keepFace for Offset```
+ * @example```let hole = Extrude(faceSketch, -12);  // scalar = along face normal```
+ * @example```Difference(body, [Extrude(faceSketch, [0.5, -12])]);  // clean cut, no sliver```*/
+function Extrude(face: oc.TopoDS_Shape, direction: number[] | number, keepFace?: boolean) : oc.TopoDS_Shape;
 
 /** Extrudes and twists a flat wire upwards along the z-axis.
  * The original wire is removed unless `keepWire` is true.

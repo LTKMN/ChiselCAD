@@ -88,8 +88,7 @@ body {
   align-items: center;
   padding: 0;
   height: 36px;
-  overflow-x: auto;
-  overflow-y: hidden;
+  /* no overflow clipping — the File dropdown hangs below the bar */
 }
 
 .topnav-brand {
@@ -165,6 +164,85 @@ body {
 
 .topnav-import {
   cursor: pointer;
+}
+
+/* --- File dropdown menu (native <details>) --- */
+.topnav-menu {
+  position: relative;
+}
+
+.topnav-menu > summary {
+  list-style: none; /* hide the disclosure triangle */
+  color: var(--cs-text-primary);
+  font-size: 14px;
+  font-family: Consolas, monospace;
+  padding: 4px 16px;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.topnav-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.topnav-menu > summary:hover {
+  background: #aaa;
+  color: black;
+}
+
+.topnav-menu[open] > summary {
+  background: var(--cs-accent);
+  color: white;
+}
+
+.topnav-menu-items {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 1000;
+  min-width: 200px;
+  background: var(--cs-bg-surface);
+  border: 1px solid var(--cs-border);
+  border-radius: var(--cs-radius);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.topnav-menu-items a,
+.topnav-menu-items label {
+  display: block;
+  padding: 6px 12px;
+  border-radius: 3px;
+  font-size: 13px;
+  font-family: var(--cs-font-ui);
+}
+
+.topnav-menu-sep {
+  height: 1px;
+  background: var(--cs-border);
+  margin: 4px 8px;
+}
+
+/* ============================================================
+   Editor panel status bar (bottom strip: language mode select)
+   ============================================================ */
+
+.cs-editor-statusbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  height: 28px;
+  padding: 0 8px;
+  background: var(--cs-bg-secondary);
+  border-top: 1px solid var(--cs-border);
+}
+
+.cs-editor-statusbar .topnav-select {
+  margin-left: 0;
 }
 
 /* ============================================================
@@ -468,31 +546,6 @@ body {
   background: var(--cs-accent);
   width: 3px !important;
   margin-left: 2px;
-}
-
-/* --- Sketch mode: topnav plane picker --- */
-.cs-plane-pop {
-  position: fixed;
-  z-index: 100;
-  background: var(--cs-bg-surface);
-  border: 1px solid var(--cs-border);
-  border-radius: var(--cs-radius);
-  padding: 4px;
-  min-width: 140px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-}
-.cs-plane-pop a {
-  display: block;
-  padding: 6px 12px !important;
-  color: var(--cs-text-primary);
-  text-decoration: none;
-  font-size: 13px;
-  font-family: var(--cs-font-ui);
-  border-radius: 3px;
-}
-.cs-plane-pop a:hover {
-  background: var(--cs-accent);
-  color: #fff;
 }
 
 /* --- Command bar at the top of the CAD viewport (SolidWorks-style):

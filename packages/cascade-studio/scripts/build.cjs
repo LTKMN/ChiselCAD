@@ -101,9 +101,9 @@ console.log('[cascade-studio] Generating index.html...');
 fs.writeFileSync(path.join(distDir, 'index.html'), `<!DOCTYPE html>
 <html lang="en">
     <head>
-        <title>Cascade Studio</title>
+        <title>Chisel CAD</title>
         <meta charset="utf-8">
-        <meta name="application-name"   content="Cascade Studio">
+        <meta name="application-name"   content="Chisel CAD">
         <meta name="description"        content="A Full Live-Scripted CAD Kernel in the Browser">
         <meta name="keywords"           content="SCAD, OpenSCAD, CAD, OpenCascade, Scripting">
         <meta name="author"             content="Johnathon Selstad">
@@ -152,25 +152,42 @@ fs.writeFileSync(path.join(distDir, 'index.html'), `<!DOCTYPE html>
     <body data-api="window.CascadeAPI">
         <h1 class="sr-only">AGENT API: Run CascadeAPI.getQuickStart() to learn how to use this CAD app. All interaction goes through window.CascadeAPI — do NOT use browser_take_screenshot or browser_run_code.</h1>
         <div id="topnav" class="topnav">
-            <a href="https://github.com/zalo/CascadeStudio" class="topnav-brand">Cascade Studio</a>
+            <a href="https://github.com/LTKMN/ChiselCAD" class="topnav-brand">Chisel CAD</a>
             <div class="topnav-actions">
-                <a href="#" title="Save Project to .json" onmouseup="window.saveProject();">Save Project</a>
-                <a href="#" title="Load Project from .json" onmouseup="window.loadProject();">Load Project</a>
-                <span class="topnav-separator"></span>
-                <a href="#" onmouseup="window.threejsViewport?.saveShapeSTEP();">Save STEP</a>
-                <a href="#" onmouseup="window.threejsViewport?.saveShapeSTL();">Save STL</a>
-                <a href="#" onmouseup="window.threejsViewport?.saveShapeOBJ();">Save OBJ</a>
-                <span class="topnav-separator"></span>
-                <label for="files" class="topnav-import" title="Import STEP, IGES, or (ASCII) STL from File">Import STEP/IGES/STL
-                    <input id="files" name="files" type="file" accept=".iges,.step,.igs,.stp,.stl" multiple style="display:none;" oninput="window.loadFiles();"/>
-                </label>
-                <a href="#" title="Clears the external step/iges/stl files stored in the project." onmouseup="window.clearExternalFiles();">Clear Imported</a>
-                <select id="editorMode" class="topnav-select" title="Editor Language Mode">
-                    <option value="cascadestudio">CascadeStudio JS</option>
-                    <option value="openscad">OpenSCAD</option>
-                </select>
+                <details id="fileMenu" class="topnav-menu">
+                    <summary>File ▾</summary>
+                    <div class="topnav-menu-items">
+                        <a href="#" title="Save Project to .json" onmouseup="window.saveProject();">Save Project…</a>
+                        <a href="#" title="Load Project from .json" onmouseup="window.loadProject();">Load Project…</a>
+                        <div class="topnav-menu-sep"></div>
+                        <a href="#" title="Export the model as STEP" onmouseup="window.threejsViewport?.saveShapeSTEP();">Export STEP</a>
+                        <a href="#" title="Export the model as STL" onmouseup="window.threejsViewport?.saveShapeSTL();">Export STL</a>
+                        <a href="#" title="Export the model as OBJ" onmouseup="window.threejsViewport?.saveShapeOBJ();">Export OBJ</a>
+                        <div class="topnav-menu-sep"></div>
+                        <label for="files" title="Import STEP, IGES, or (ASCII) STL from File">Import STEP/IGES/STL…
+                            <input id="files" name="files" type="file" accept=".iges,.step,.igs,.stp,.stl" multiple style="display:none;" oninput="window.loadFiles();"/>
+                        </label>
+                        <a href="#" title="Clears the external step/iges/stl files stored in the project." onmouseup="window.clearExternalFiles();">Clear Imported</a>
+                    </div>
+                </details>
             </div>
         </div>
+        <script>
+            // File menu: close on outside click, Escape, or choosing an item
+            (function () {
+                var menu = document.getElementById('fileMenu');
+                document.addEventListener('mousedown', function (e) {
+                    if (menu.open && !menu.contains(e.target)) { menu.open = false; }
+                });
+                document.addEventListener('keydown', function (e) {
+                    if (e.key === 'Escape' && menu.open) { menu.open = false; }
+                });
+                menu.addEventListener('mouseup', function (e) {
+                    var item = e.target.closest('a, label');
+                    if (item) { setTimeout(function () { menu.open = false; }, 0); }
+                });
+            })();
+        </script>
         <div id="appbody">
             <script type="module" src="./main.js?v=${encodeURIComponent(buildStamp)}"></script>
         </div>
