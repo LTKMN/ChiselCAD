@@ -92,13 +92,29 @@ const GLYPHS = {
   perp: '⊥', equal: '=', concentric: '◎', tangent: '⌒',
 };
 
-const COLOR_ENTITY = 0xe8e8e8;
-const COLOR_ACCENT = 0x4CAF50;
-const COLOR_REMOVE = 0xff7043;
-const GLYPH_REL = '#9e9e9e';   // relation glyphs — quiet gray
-const GLYPH_DIM = '#4CAF50';   // dimension values — accent
-const GLYPH_SEL = '#ffffff';   // selected glyph
-const GLYPH_BAD = '#ff5252';   // unsatisfiable (over-constrained)
+// Sketch palette — mutable so a Blender theme import can restyle it
+// (colors are read at draw/creation time; applies from the next repaint on)
+const SKETCH_PALETTE_DEFAULTS = {
+  entity: 0xe8e8e8, accent: 0x4CAF50, remove: 0xff7043,
+  glyphRel: '#9e9e9e', glyphDim: '#4CAF50', glyphSel: '#ffffff', glyphBad: '#ff5252',
+};
+let COLOR_ENTITY = SKETCH_PALETTE_DEFAULTS.entity;
+let COLOR_ACCENT = SKETCH_PALETTE_DEFAULTS.accent;
+let COLOR_REMOVE = SKETCH_PALETTE_DEFAULTS.remove;
+let GLYPH_REL = SKETCH_PALETTE_DEFAULTS.glyphRel;   // relation glyphs — quiet gray
+let GLYPH_DIM = SKETCH_PALETTE_DEFAULTS.glyphDim;   // dimension values — accent
+let GLYPH_SEL = SKETCH_PALETTE_DEFAULTS.glyphSel;   // selected glyph
+let GLYPH_BAD = SKETCH_PALETTE_DEFAULTS.glyphBad;   // unsatisfiable (over-constrained)
+
+/** Restyle the sketch overlay from a theme ({entity, accent, glyphRel,
+ *  glyphDim} as CSS hex strings) or back to defaults with null. */
+export function applySketchTheme(sketch) {
+  const hexToInt = (h) => parseInt(String(h).replace('#', ''), 16);
+  COLOR_ENTITY = sketch && sketch.entity ? hexToInt(sketch.entity) : SKETCH_PALETTE_DEFAULTS.entity;
+  COLOR_ACCENT = sketch && sketch.accent ? hexToInt(sketch.accent) : SKETCH_PALETTE_DEFAULTS.accent;
+  GLYPH_REL = sketch && sketch.glyphRel ? sketch.glyphRel : SKETCH_PALETTE_DEFAULTS.glyphRel;
+  GLYPH_DIM = sketch && sketch.glyphDim ? sketch.glyphDim : SKETCH_PALETTE_DEFAULTS.glyphDim;
+}
 
 // ---------- small 2D helpers ----------
 const sub2 = (p, q) => [p[0] - q[0], p[1] - q[1]];

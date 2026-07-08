@@ -5,9 +5,10 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js';
 import { HandleManager } from './CascadeViewHandles.js';
+import { VIEWPORT_DEFAULTS } from './ThemeManager.js';
 
 /** Base class for a 3D viewport environment.
- *  Includes floor, grid, fog, camera, lights, and orbit controls. */
+ *  Includes infinite grid, camera, lights, and orbit controls. */
 class Environment {
   constructor(goldenContainer) {
     this.goldenContainer = goldenContainer;
@@ -30,7 +31,6 @@ class Environment {
     this.scene = new THREE.Scene();
     this.backgroundColor  = 0x222222;
     this.scene.background = new THREE.Color(this.backgroundColor);
-    this.scene.fog        = new THREE.Fog(this.backgroundColor, 200, 600);
 
     this.camera = new THREE.PerspectiveCamera(45, 1, 1, 5000);
     this.camera.position.set(50, 100, 150);
@@ -43,17 +43,8 @@ class Environment {
     this.light.position.set(0, 200, 0);
     this.light2 = new THREE.DirectionalLight(0xbbbbbb);
     this.light2.position.set(6, 50, -12);
-    this.light2.castShadow = true;
-    this.light2.shadow.camera.top      =  200;
-    this.light2.shadow.camera.bottom   = -200;
-    this.light2.shadow.camera.left     = -200;
-    this.light2.shadow.camera.right    =  200;
-    this.light2.shadow.mapSize.width   =  128;
-    this.light2.shadow.mapSize.height  =  128;
     this.scene.add(this.light);
     this.scene.add(this.light2);
-    this.renderer.shadowMap.enabled    = true;
-    this.renderer.shadowMap.type       = THREE.PCFSoftShadowMap;
 
     // Set up the orbit controls, Blender-style: middle-mouse orbits,
     // Shift+middle pans (OrbitControls flips ROTATE→PAN on shift/ctrl/meta
@@ -116,7 +107,10 @@ class CascadeEnvironment {
     // State for the Hover Highlighting
     this.raycaster       = new THREE.Raycaster();
     this.highlightedObj  = null;
-    this.fogDist         = 200;
+
+    // Viewport theme colors (overridden by ThemeManager.applyToViewport
+    // right after construction when a Blender theme is active)
+    this._vtheme         = Object.assign({}, VIEWPORT_DEFAULTS);
 
     // State for the Handles
     this.handles         = [];
@@ -185,7 +179,7 @@ class CascadeEnvironment {
     });
 
     // Viewport display settings (app-level, not per-model) — persisted locally
-    this._viewportSettings = { groundPlane: true, grid: true };
+    this._viewportSettings = { grid: true };
     try {
       Object.assign(this._viewportSettings, JSON.parse(localStorage.getItem('chisel-viewport') || '{}'));
     } catch (e) { /* corrupted prefs — fall back to defaults */ }
@@ -227,10 +221,7 @@ class CascadeEnvironment {
 
     this.mainObject = this._buildObjectFromMesh(facelist, edgelist);
 
-    // Expand fog distance to enclose the current object
     this.boundingBox = new THREE.Box3().setFromObject(this.mainObject);
-    this.fogDist = Math.max(this.fogDist, this.boundingBox.min.distanceTo(this.boundingBox.max) * 1.5);
-    this.environment.scene.fog = new THREE.Fog(this.environment.backgroundColor, this.fogDist, this.fogDist + 400);
 
     // Cache the final mesh data for the timeline's last step
     this._finalMeshData = [facelist, edgelist];
@@ -442,7 +433,6 @@ class CascadeEnvironment {
     geometry.computeBoundingSphere();
     geometry.computeBoundingBox();
     let model = new THREE.Mesh(geometry, this.matcapMaterial);
-    model.castShadow = true;
     model.name = "Model Faces";
     group.add(model);
 
@@ -469,9 +459,16 @@ class CascadeEnvironment {
       curGlobalEdgeIndex++;
     });
 
+    // Edge colors come from the viewport theme: base wire color normally,
+    // edge-select color for the highlighted edge (env._vtheme is read at
+    // paint time so a theme change repaints existing edges via clearHighlights)
+    const env = this;
     let lineGeometry = new THREE.BufferGeometry().setFromPoints(lineVertices);
     let lineColors = [];
-    for (let i = 0; i < lineVertices.length; i++) { lineColors.push(0, 0, 0); }
+    {
+      const wire = new THREE.Color(env._vtheme.wire);
+      for (let i = 0; i < lineVertices.length; i++) { lineColors.push(wire.r, wire.g, wire.b); }
+    }
     lineGeometry.setAttribute('color', new THREE.Float32BufferAttribute(lineColors, 3));
     let lineMaterial = new THREE.LineBasicMaterial({
       color: 0xffffff, linewidth: 1.5, vertexColors: true
@@ -485,9 +482,13 @@ class CascadeEnvironment {
       let edgeIndex  = lineIndex >= 0 ? this.globalEdgeIndices[lineIndex] : lineIndex;
       let startIndex = this.globalEdgeMetadata[edgeIndex].start;
       let endIndex   = this.globalEdgeMetadata[edgeIndex].end;
-      for (let i = 0; i < this.lineColors.length; i++) {
-        let colIndex       = Math.floor(i / 3);
-        this.lineColors[i] = (colIndex >= startIndex && colIndex <= endIndex) ? 1 : 0;
+      const wire = new THREE.Color(env._vtheme.wire);
+      const sel  = new THREE.Color(env._vtheme.edgeSelect);
+      for (let v = 0; v * 3 < this.lineColors.length; v++) {
+        const c = (v >= startIndex && v <= endIndex) ? sel : wire;
+        this.lineColors[v * 3 + 0] = c.r;
+        this.lineColors[v * 3 + 1] = c.g;
+        this.lineColors[v * 3 + 2] = c.b;
       }
       this.geometry.setAttribute('color', new THREE.Float32BufferAttribute(this.lineColors, 3));
     }.bind(line);
@@ -550,7 +551,7 @@ class CascadeEnvironment {
     geometry.setIndex(triangles);
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
     const material = new THREE.MeshBasicMaterial({
-      color: 0x4CAF50, transparent: true, opacity: 0.35,
+      color: new THREE.Color(this._vtheme.glow), transparent: true, opacity: 0.35,
       depthWrite: false, polygonOffset: true,
       polygonOffsetFactor: -4.0, polygonOffsetUnits: -4.0,
     });
@@ -730,7 +731,6 @@ class CascadeEnvironment {
   /** Scene options derived from viewport settings, sent with each evaluation. */
   getSceneOptions() {
     return {
-      groundPlaneVisible: this._viewportSettings.groundPlane,
       gridVisible: this._viewportSettings.grid,
     };
   }
@@ -746,39 +746,98 @@ class CascadeEnvironment {
     this.environment.viewDirty = true;
   }
 
-  /** (Re)create or remove the ground plane and grid to match sceneOptions. */
+  /** (Re)create or remove the infinite grid to match sceneOptions. */
   _updateGroundAndGrid(sceneOptions) {
-    this.environment.scene.remove(this.groundMesh);
-    if (sceneOptions.groundPlaneVisible) {
-      this.groundMesh = new THREE.Mesh(
-        new THREE.PlaneGeometry(2000, 2000),
-        new THREE.MeshPhongMaterial({
-          color: 0x080808, depthWrite: true, dithering: true,
-          polygonOffset: true,
-          polygonOffsetFactor: 6.0, polygonOffsetUnits: 1.0
-        })
-      );
-      this.groundMesh.position.y = -0.1;
-      this.groundMesh.rotation.x = -Math.PI / 2;
-      this.groundMesh.receiveShadow = true;
-      this.environment.scene.add(this.groundMesh);
-    }
-
     this.environment.scene.remove(this.grid);
+    if (this.grid) { this.grid.material.dispose(); this.grid.geometry.dispose(); }
     if (sceneOptions.gridVisible) {
-      this.grid = new THREE.GridHelper(2000, 20, 0xcccccc, 0xcccccc);
-      this.grid.position.y = -0.01;
-      this.grid.material.opacity = 0.3;
-      this.grid.material.transparent = true;
+      this.grid = CascadeEnvironment._makeInfiniteGrid(this._vtheme.grid, this._vtheme.gridAlpha);
       this.environment.scene.add(this.grid);
     }
+  }
+
+  /** Blender-style infinite grid: a huge shader plane drawing 10mm minor and
+   *  100mm major lines, anti-aliased via screen-space derivatives and faded
+   *  radially with distance from the camera (which is what lets it read as
+   *  infinite without fog or a floor plane). */
+  static _makeInfiniteGrid(colorHex, opacity) {
+    const material = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uColor:     { value: new THREE.Color(colorHex) },
+        uOpacity:   { value: opacity },
+        uSizeMinor: { value: 10.0 },
+        uSizeMajor: { value: 100.0 },
+        uDistance:  { value: 4000.0 },
+      },
+      vertexShader: `
+        varying vec3 vWorldPos;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldPos = wp.xyz;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }`,
+      fragmentShader: `
+        varying vec3 vWorldPos;
+        uniform vec3 uColor;
+        uniform float uOpacity, uSizeMinor, uSizeMajor, uDistance;
+        float gridLine(float size) {
+          vec2 r = vWorldPos.xz / size;
+          vec2 g = abs(fract(r - 0.5) - 0.5) / fwidth(r);
+          return 1.0 - min(min(g.x, g.y), 1.0);
+        }
+        void main() {
+          float fade = pow(1.0 - min(distance(cameraPosition.xz, vWorldPos.xz) / uDistance, 1.0), 2.0);
+          float alpha = max(gridLine(uSizeMajor), gridLine(uSizeMinor) * 0.4) * fade * uOpacity;
+          if (alpha <= 0.002) { discard; }
+          gl_FragColor = vec4(uColor, alpha);
+        }`,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(100000, 100000), material);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.y = -0.01;
+    mesh.name = 'Infinite Grid';
+    mesh.renderOrder = -1;  // first among transparents, under highlight overlays
+    return mesh;
+  }
+
+  /** Apply a viewport color theme (from ThemeManager) live: background
+   *  (solid or Blender-style vertical gradient), infinite grid, and a
+   *  repaint of any existing edge lines. Pass null for the built-in theme. */
+  applyViewportTheme(view) {
+    this._vtheme = Object.assign({}, VIEWPORT_DEFAULTS, view || {});
+    const env = this.environment;
+    const bottom = new THREE.Color(this._vtheme.bgBottom);
+
+    if (this._vtheme.bgTop !== this._vtheme.bgBottom) {
+      // Blender-style screen-space vertical gradient
+      const canvas = document.createElement('canvas');
+      canvas.width = 1; canvas.height = 256;
+      const ctx = canvas.getContext('2d');
+      const grad = ctx.createLinearGradient(0, 0, 0, 256);
+      grad.addColorStop(0, this._vtheme.bgTop);
+      grad.addColorStop(1, this._vtheme.bgBottom);
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 1, 256);
+      env.scene.background = new THREE.CanvasTexture(canvas);
+    } else {
+      env.scene.background = bottom.clone();
+    }
+
+    env.backgroundColor = bottom.getHex();
+    this._updateGroundAndGrid(this.getSceneOptions());
+
+    // Repaint existing model edges with the new wire color
+    env.scene.traverse((obj) => { if (obj.clearHighlights) { obj.clearHighlights(); } });
+    env.viewDirty = true;
   }
 
   /** Blender-style viewport settings button + popover in the bottom-right
    *  corner. New display settings (matcap, SSAO, ...) slot into the defs list. */
   _createViewportSettingsOverlay() {
     const settingsDefs = [
-      { key: 'groundPlane', label: 'Ground Plane' },
       { key: 'grid', label: 'Grid' },
     ];
 

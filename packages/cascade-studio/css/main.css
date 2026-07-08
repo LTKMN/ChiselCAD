@@ -75,7 +75,7 @@ body {
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #999;
+  background: color-mix(in srgb, var(--cs-scrollbar-thumb), white 25%);
 }
 
 /* ============================================================
@@ -265,14 +265,14 @@ body {
   --dv-tabs-and-actions-container-background-color: transparent;
   --dv-tabs-and-actions-container-height: 20px;
   --dv-tabs-and-actions-container-font-size: 11px;
-  --dv-activegroup-visiblepanel-tab-background-color: #222;
-  --dv-activegroup-hiddenpanel-tab-background-color: #1a1a1a;
-  --dv-inactivegroup-visiblepanel-tab-background-color: #222;
-  --dv-inactivegroup-hiddenpanel-tab-background-color: #1a1a1a;
+  --dv-activegroup-visiblepanel-tab-background-color: var(--cs-bg-primary);
+  --dv-activegroup-hiddenpanel-tab-background-color: color-mix(in srgb, var(--cs-bg-primary), black 25%);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--cs-bg-primary);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: color-mix(in srgb, var(--cs-bg-primary), black 25%);
   --dv-tab-divider-color: var(--cs-border);
-  --dv-activegroup-visiblepanel-tab-color: #ddd;
+  --dv-activegroup-visiblepanel-tab-color: var(--cs-text-secondary);
   --dv-activegroup-hiddenpanel-tab-color: var(--cs-text-muted);
-  --dv-inactivegroup-visiblepanel-tab-color: #ddd;
+  --dv-inactivegroup-visiblepanel-tab-color: var(--cs-text-secondary);
   --dv-inactivegroup-hiddenpanel-tab-color: var(--cs-text-muted);
   --dv-separator-border: var(--cs-border);
   --dv-group-view-background-color: var(--cs-bg-primary);
@@ -304,12 +304,12 @@ body {
 :root {
   --tp-font-family: Arial, sans-serif;
   --tp-base-background-color: var(--cs-bg-surface);
-  --tp-button-background-color: hsl(0, 0%, 25%);
-  --tp-button-background-color-active: hsl(0, 0%, 40%);
-  --tp-button-background-color-focus: hsl(0, 0%, 35%);
-  --tp-button-background-color-hover: hsl(0, 0%, 30%);
-  --tp-button-foreground-color: #eee;
-  --tp-label-foreground-color: #aeb5b8;
+  --tp-button-background-color: var(--cs-bg-elevated);
+  --tp-button-background-color-active: color-mix(in srgb, var(--cs-bg-elevated), white 15%);
+  --tp-button-background-color-focus: color-mix(in srgb, var(--cs-bg-elevated), white 10%);
+  --tp-button-background-color-hover: color-mix(in srgb, var(--cs-bg-elevated), white 5%);
+  --tp-button-foreground-color: var(--cs-text-primary);
+  --tp-label-foreground-color: var(--cs-text-secondary);
 }
 
 .gui-panel {

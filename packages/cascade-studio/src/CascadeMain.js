@@ -10,6 +10,7 @@ import { GUIManager } from './GUIManager.js';
 import { OpenSCADMonaco } from './openscad/OpenSCADMonaco.js';
 import { CascadeAPI } from './CascadeAPI.js';
 import { SketchMode } from './SketchMode.js';
+import { ThemeManager } from './ThemeManager.js';
 import { deflateSync, inflateSync, strToU8, strFromU8 } from 'fflate';
 
 /** Adapter that wraps a dockview panel to provide a Golden-Layout-compatible container API.
@@ -90,6 +91,12 @@ class CascadeStudioApp {
     window.loadProject = () => this.loadProject();
     window.loadFiles = (id) => this.loadFiles(id);
     window.clearExternalFiles = () => this.clearExternalFiles();
+
+    // Blender theme import (File ▾ menu + drag-and-drop .xml onto the window)
+    this.themeManager = new ThemeManager(this);
+    this.themeManager.init();
+    window.loadBlenderTheme = () => this.themeManager.loadFromInput('blenderTheme');
+    window.resetTheme = () => this.themeManager.reset();
 
     // Blender-style viewport hotkeys:
     //   N            toggle the floating CAD control panel (sidebar key)
@@ -407,6 +414,9 @@ class CascadeStudioApp {
     // (Re)build the feature/sketch command bar inside the new viewport panel
     if (this.sketchMode) { this.sketchMode.attachToViewport(); }
 
+    // Re-apply any active Blender theme to the freshly created viewport
+    if (this.themeManager) { this.themeManager.applyToViewport(); }
+
     // Wire timeline step changes to editor line highlighting
     this._historyDecorations = [];
     this.viewport._onHistoryStepChange = (lineNumber) => {
@@ -590,78 +600,76 @@ class CascadeStudioApp {
 
 /** Default starter code shown in the editor. */
 CascadeStudioApp.STARTER_CODE =
-`// Welcome to Cascade Studio!  A Browser-Based CAD Modeling Environment.
-// Adjust these sliders to modify the model in real time:
-let width     = Slider("Width",      80, 40, 120);
-let depth     = Slider("Depth",      60, 30, 100);
-let height    = Slider("Height",     30, 15, 50);
-let wall      = Slider("Wall",        3,  2,  8);
-let filletR   = Slider("Fillet",       6,  1, 15);
-let showLabel = Checkbox("Label",   true);
+`// Welcome to ChiselCAD!  A Browser-Based Parametric CAD Environment.
+// The starter model is a woodworking chisel - adjust the sliders:
+let bladeW    = Slider("Blade Width",    20,  6,  40);
+let bladeLen  = Slider("Blade Length",   90, 40, 150);
+let bladeT    = Slider("Blade Thick",     5,  3,   9);
+let shankLen  = Slider("Shank Length",   40, 20,  70);
+let shankD    = Slider("Shank Diam",     10,  6,  16);
+let handleLen = Slider("Handle Length", 100, 70, 140);
+let handleD   = Slider("Handle Diam",    30, 20,  42);
+let stamp     = Checkbox("Width Stamp", true);
 
-// --- Base Tray (Sketch + Extrude) ---
-// Sketch: Draw a rounded-rectangle, then extrude it into a solid
-let outerFace = new Sketch([-width/2, -depth/2])
-  .LineTo([ width/2, -depth/2]).Fillet(filletR)
-  .LineTo([ width/2,  depth/2]).Fillet(filletR)
-  .LineTo([-width/2,  depth/2]).Fillet(filletR)
-  .LineTo([-width/2, -depth/2]).Fillet(filletR)
+let shankR   = shankD / 2;
+let hr       = handleD / 2;          // handle radius at the swell
+let hz       = bladeLen + shankLen;  // height where the handle seats
+let ferruleR = Math.min(hr * 0.9, Math.max(hr * 0.72, shankR + 2));
+
+// --- Blade (Sketch in XZ plane + Extrude) ---
+// Side profile with a 25-degree cutting bevel at the tip
+let bevelRise = bladeT / Math.tan(25 * Math.PI / 180);
+let bladeFace = new Sketch([0, 0], "XZ")
+  .LineTo([bladeT, bevelRise])   // cutting bevel
+  .LineTo([bladeT, bladeLen])    // top side
+  .LineTo([0, bladeLen])         // flat back
   .End(true).Face();
-let tray = Extrude(outerFace, [0, 0, height], true);  // keepFace: reuse for Offset below
+let blade = Translate([-bladeT/2, -bladeW/2, 0],
+  Extrude(bladeFace, [0, bladeW, 0]));
 
-// Offset: Create inner profile while outerFace is still intact
-let innerFace = Offset(outerFace, -wall);
+// ChamferEdges + Selector: ease the four long edges of the blade
+let longEdges = Edges(blade).parallel([0, 0, 1]).indices();
+blade = ChamferEdges(blade, bladeT * 0.22, longEdges);
 
-// FilletEdges + Selector: Round the top rim edges
-let topEdges = Edges(tray).max([0,0,1]).indices();
-tray = FilletEdges(tray, wall * 0.4, topEdges);
+// --- Neck (Loft): blend the rectangular blade into the round shank ---
+let neckLen = shankLen * 0.45;
+let rectWire = Polygon([
+  [ bladeT/2, -bladeW/2, bladeLen],
+  [ bladeT/2,  bladeW/2, bladeLen],
+  [-bladeT/2,  bladeW/2, bladeLen],
+  [-bladeT/2, -bladeW/2, bladeLen]], true);
+let circWire = Translate([0, 0, bladeLen + neckLen], Circle(shankR, true));
+let neck = Loft([rectWire, circWire]);
 
-// Difference: Hollow out to create a tray
-let cavity = Translate([0, 0, wall], Extrude(innerFace, [0, 0, height]));
-tray = Difference(tray, [cavity]);
+// --- Shank + Bolster (Cylinder + Cone + Union) ---
+let shank = Translate([0, 0, bladeLen + neckLen], Cylinder(shankR, shankLen - neckLen));
+let bolsterH = Math.min(8, shankLen * 0.25);
+let bolster = Translate([0, 0, hz - bolsterH], Cone(shankR, ferruleR, bolsterH));
+let steel = Union([blade, neck, shank, bolster]);
 
-// --- Divider (Box + Union) ---
-let divider = Translate([-wall/2, -(depth - wall*2)/2, wall],
-  Box(wall, depth - wall*2, height - wall*2));
-tray = Union([tray, divider]);
+// --- Handle (Sketch profile in XZ + Revolve) ---
+// Lathe-turned profile: ferrule band, swell, grip taper, rounded butt
+let handleProfile = new Sketch([0, hz], "XZ")
+  .LineTo([ferruleR, hz])
+  .LineTo([ferruleR, hz + handleLen * 0.14])                    // ferrule band
+  .LineTo([hr,        hz + handleLen * 0.40]).Fillet(hr * 0.45) // swell
+  .LineTo([hr * 0.86, hz + handleLen * 0.82]).Fillet(hr * 0.9)  // grip taper
+  .LineTo([hr * 0.55, hz + handleLen]).Fillet(hr * 0.32)        // shoulder
+  .LineTo([0, hz + handleLen])                                  // butt
+  .End(true).Face();
+let handle = Revolve(handleProfile, 360);
 
-// --- Pen Holder (Revolve + ChamferEdges) ---
-// Revolve an L-shaped profile around Z to create a hollow cup in one step
-let penR = depth / 4;
-let penH = height * 1.6;
-let penX = width/2 + penR + 3;
-let cupProfile = Polygon([
-  [0, 0, 0], [penR, 0, 0], [penR, 0, penH],
-  [penR - wall, 0, penH], [penR - wall, 0, wall], [0, 0, wall]
-]);
-let holder = Revolve(cupProfile, 360, [0, 0, 1]);
-let chamferEdges = Edges(holder).max([0,0,1]).ofType("Circle").indices();
-holder = ChamferEdges(holder, wall * 0.3, chamferEdges);
-Translate([penX, 0, 0], holder);
-
-// --- Decorative Cutout (Sphere + Boolean + Mirror) ---
-let cutR = Math.min(8, height * 0.25);
-let cutout = Translate([0, -depth/2, height * 0.5], Sphere(cutR));
-tray = Difference(tray, [cutout]);
-// Mirror: Matching cutout on the back wall
-tray = Difference(tray, [Mirror([0, 1, 0], cutout)]);
-
-// --- RotatedExtrude: Decorative twisted accent ---
-let spiralWire = Translate([3, 0, 0], Circle(1.5, true));
-let spiral = RotatedExtrude(spiralWire, 12, 180);
-Translate([-width/2 - 6, -depth/4, 0], spiral);
-
-// --- 3D Text Label ---
-if (showLabel) {
-  let label = Text3D("CS", 10, wall * 0.2, "Consolas");
-  Translate([width/4, -depth/2 - wall * 0.2, height * 0.3], label);
+// --- Width stamp (Text3D on the blade face) ---
+if (stamp) {
+  let label = Rotate([0, 0, 1], -90,
+    Text3D(Math.round(bladeW) + "", 7, 0.25, "Consolas"));
+  Translate([-(bladeT/2 + 0.5), 3.5, bladeLen * 0.9], label);
 }
 
 // --- Measurements ---
-console.log("Volume:  " + Math.abs(Volume(tray)).toFixed(0) + " mm\\u00B3");
-console.log("Surface: " + SurfaceArea(tray).toFixed(0) + " mm\\u00B2");
-let com = CenterOfMass(tray);
-console.log("Center:  [" + com.map(v => v.toFixed(1)).join(", ") + "]");`;
+console.log("Overall length: " + (bladeLen + shankLen + handleLen).toFixed(0) + " mm");
+console.log("Steel volume:   " + Math.abs(Volume(steel)).toFixed(0) + " mm\\u00B3");
+console.log("Handle volume:  " + Math.abs(Volume(handle)).toFixed(0) + " mm\\u00B3");`;
 
 /** Default OpenSCAD starter code shown when switching to OpenSCAD mode. */
 CascadeStudioApp.OPENSCAD_STARTER_CODE =

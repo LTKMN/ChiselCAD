@@ -96,6 +96,16 @@ for (const file of ['manifest.webmanifest']) {
   }
 }
 
+// Default theme: Brennan's Blender theme at the monorepo root ships as the
+// built-in look (ThemeManager loads dist/default-theme.xml when no imported
+// theme is saved, and Reset Theme returns to it)
+const defaultTheme = path.join(monoRoot, 'brennan_2021.xml');
+if (fs.existsSync(defaultTheme)) {
+  fs.copyFileSync(defaultTheme, path.join(distDir, 'default-theme.xml'));
+} else {
+  console.warn('[cascade-studio] WARNING: brennan_2021.xml not found at repo root — falling back to the hardcoded dark theme');
+}
+
 // 6. Generate dist/index.html
 console.log('[cascade-studio] Generating index.html...');
 fs.writeFileSync(path.join(distDir, 'index.html'), `<!DOCTYPE html>
@@ -168,6 +178,11 @@ fs.writeFileSync(path.join(distDir, 'index.html'), `<!DOCTYPE html>
                             <input id="files" name="files" type="file" accept=".iges,.step,.igs,.stp,.stl" multiple style="display:none;" oninput="window.loadFiles();"/>
                         </label>
                         <a href="#" title="Clears the external step/iges/stl files stored in the project." onmouseup="window.clearExternalFiles();">Clear Imported</a>
+                        <div class="topnav-menu-sep"></div>
+                        <label for="blenderTheme" title="Restyle the app from a Blender interface theme (.xml) — or just drag one onto the window">Import Blender Theme…
+                            <input id="blenderTheme" name="blenderTheme" type="file" accept=".xml" style="display:none;" oninput="window.loadBlenderTheme();"/>
+                        </label>
+                        <a href="#" title="Return to the default theme" onmouseup="window.resetTheme();">Reset Theme</a>
                     </div>
                 </details>
             </div>
