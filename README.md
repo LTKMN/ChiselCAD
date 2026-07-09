@@ -5,11 +5,13 @@
 ChiselCAD is a personal, opinionated fork of [zalo's CascadeStudio](https://github.com/zalo/CascadeStudio). It runs the full [OpenCascade](https://github.com/Open-Cascade-SAS/OCCT) (OCCT 8.0) kernel compiled to WebAssembly, with a Three.js viewport and a Monaco editor, and it is built around two main workflows:
 
 <ul>
-  <li> **draw a sketch, pull it into a feature, tune numbers and variables in code, export for 3D printing.**</li>
-  <li> **get an LLM to do everything like some sort of magic.**</li>
+  <li>draw a sketch, pull it into a feature, tune numbers in code or via variables with realtime sliders.</li>
+  <li>get an LLM to do everything like some sort of personal CAD wizard.</li>
 </ul>
 
-The main idea is **GUI for creation, code for editing.** Writing geometry from scratch in code is slow and clunky - way easier to click and draw out lines, shapes and constraints directly in the 3D view. But the moment a sketch is committed it becomes plain JavaScript in the editor — and from then on the *code is the model*. Changing a radius is right there, you don't have to go back into sketch editors and layers of menus; no open/edit/save modal loop, no property dialogs to hunt through, etc.
+The main idea is **GUI for creation, code for editing.** Writing geometry from scratch in code is slow and clunky - way easier to click and draw out lines, shapes and constraints directly in the 3D view. But the moment a sketch is committed it becomes plain JavaScript in the editor — and from then on the *code is the model*. Changing a radius is right there, you don't have to go back into sketch editors and layers of menus; no open/edit/save modal loop, no property dialogs to hunt through, etc. If you want to go even faster, you can assign a value to a named variable and make a slider out of it.
+
+There's also cool dynamic things you can do with this - notice in the example chisel model that when you use the slider to make the blade wider, the embossed number also changes to match. You can link things to other things however you'd like, it's all just code.
 
 <p align="center">
   <img src="./packages/cascade-studio/icon/chiselmain.png" alt="The ChiselCAD IDE: the parametric chisel starter model in the 3D viewport alongside its JavaScript source" width="900">
