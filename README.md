@@ -15,10 +15,10 @@ The main idea is **GUI for creation, code for editing.** Writing geometry from s
 <p>This took 30 seconds. I probably spent longer drawing my crummy sketch than it took to make it and get it into Bambu studio to print.
 
 <p align="center">
-  <img src="./packages/cascade-studio/icon/sketch.webp" alt="A hand-drawn dot-grid sketch of the bracket with its key dimensions" height="185">
-  <img src="./packages/cascade-studio/icon/bracket-wide.jpg" alt="The bracket modeled parametrically in ChiselCAD, driven by labelled sliders in the control panel" height="185">
-  <img src="./packages/cascade-studio/icon/bracket.webp" alt="A clean matcap render of the finished bracket" height="185">
-  <img src="./packages/cascade-studio/icon/3dprint.webp" alt="The exported bracket laid out on the bed in a 3D-print slicer" height="185">
+  <img src="./packages/cascade-studio/icon/sketch.webp" alt="A hand-drawn dot-grid sketch of the bracket with its key dimensions" height="445">
+  <img src="./packages/cascade-studio/icon/bracket.webp" alt="A clean matcap render of the finished bracket" height="445">
+  <img src="./packages/cascade-studio/icon/bracket-wide.jpg" alt="The bracket modeled parametrically in ChiselCAD, driven by labelled sliders in the control panel" height="445">
+  <img src="./packages/cascade-studio/icon/3dprint.webp" alt="The exported bracket laid out on the bed in a 3D-print slicer" height="445">
 </p>
 
 <p>(This process was done with Fable in the browser chat window - given information was the example chisel code + the sketch photo. No additional MCPs or skills needed)
