@@ -10,7 +10,7 @@ The main idea is **GUI for creation, code for editing.** Writing geometry from s
   <img src="./packages/cascade-studio/icon/chiselmain.png" alt="The ChiselCAD IDE: the parametric chisel starter model in the 3D viewport alongside its JavaScript source" width="900">
 </p>
 
-<p align="center"><em>From napkin sketch to printed part — start to finish:</em></p>
+## From napkin sketch to printed part — start to finish:
 
 <p>This took 30 seconds. I probably spent longer drawing my crummy sketch than it took to make it and get it into Bambu studio to print.
 
@@ -23,12 +23,6 @@ The main idea is **GUI for creation, code for editing.** Writing geometry from s
 
 <p>(This process was done with Fable in the browser chat window - given information was the example chisel code + the sketch photo. No additional MCPs or skills needed)
 
-<p align="center">
-  <img src="./packages/cascade-studio/icon/Variety.png" height="150">
-  <img src="./packages/cascade-studio/icon/Fillet.png" height="150">
-  <img src="./packages/cascade-studio/icon/RotatedExtrusion.png" height="150">
-  <img src="./packages/cascade-studio/icon/Loft.png" height="150">
-</p>
 
 ## What this fork adds
 
