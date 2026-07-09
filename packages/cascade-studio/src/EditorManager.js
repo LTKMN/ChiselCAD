@@ -80,6 +80,9 @@ class EditorManager {
     container.element.appendChild(editorHost);
     container.element.appendChild(this._buildStatusBar());
 
+    // AI assistant strip (collapsible) below the status bar
+    if (this._app.llmChat) { this._app.llmChat.mount(container.element); }
+
     // Initialize the Monaco Code Editor
     const isMobile = window.innerHeight > window.innerWidth;
     this.editor = monaco.editor.create(editorHost, {

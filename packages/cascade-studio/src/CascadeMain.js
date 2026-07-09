@@ -11,6 +11,8 @@ import { OpenSCADMonaco } from './openscad/OpenSCADMonaco.js';
 import { CascadeAPI } from './CascadeAPI.js';
 import { SketchMode } from './SketchMode.js';
 import { ThemeManager } from './ThemeManager.js';
+import { LLMIntegration } from './LLMIntegration.js';
+import { LLMChat } from './LLMChat.js';
 import { deflateSync, inflateSync, strToU8, strFromU8 } from 'fflate';
 
 /** Adapter that wraps a dockview panel to provide a Golden-Layout-compatible container API.
@@ -142,6 +144,15 @@ class CascadeStudioApp {
 
     // In-viewport sketching (topnav "New Sketch" button + tool ribbon)
     this.sketchMode = new SketchMode(this);
+
+    // LLM provider connection (topnav "LLM ▾" menu; chat panel comes later).
+    // Must init before initialize() below — the OpenRouter OAuth callback
+    // returns ?code=..., which initialize() would misread as a shared project.
+    this.llm = new LLMIntegration(this);
+    this.llm.init();
+
+    // AI assistant chat strip (mounted into the editor panel by EditorManager)
+    this.llmChat = new LLMChat(this);
 
     // Register OpenSCAD language with Monaco (for syntax highlighting)
     this._openscadMonaco.registerLanguage();
