@@ -2,7 +2,12 @@
 
 **A code-first parametric CAD tool for the browser**
 
-ChiselCAD is a personal, opinionated fork of [zalo's CascadeStudio](https://github.com/zalo/CascadeStudio). It runs the full [OpenCascade](https://github.com/Open-Cascade-SAS/OCCT) (OCCT 8.0) kernel compiled to WebAssembly, with a Three.js viewport and a Monaco editor, and it is built around one workflow: **draw a sketch, pull it into a feature, tune numbers and variables in code, export for 3D printing.**
+ChiselCAD is a personal, opinionated fork of [zalo's CascadeStudio](https://github.com/zalo/CascadeStudio). It runs the full [OpenCascade](https://github.com/Open-Cascade-SAS/OCCT) (OCCT 8.0) kernel compiled to WebAssembly, with a Three.js viewport and a Monaco editor, and it is built around two main workflows:
+
+<ul>
+  <li> **draw a sketch, pull it into a feature, tune numbers and variables in code, export for 3D printing.**</li>
+  <li> **get an LLM to do everything like some sort of magic.**</li>
+</ul>
 
 The main idea is **GUI for creation, code for editing.** Writing geometry from scratch in code is slow and clunky - way easier to click and draw out lines, shapes and constraints directly in the 3D view. But the moment a sketch is committed it becomes plain JavaScript in the editor — and from then on the *code is the model*. Changing a radius is right there, you don't have to go back into sketch editors and layers of menus; no open/edit/save modal loop, no property dialogs to hunt through, etc.
 
