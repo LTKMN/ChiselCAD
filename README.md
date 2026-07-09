@@ -10,6 +10,19 @@ The main idea is **GUI for creation, code for editing.** Writing geometry from s
   <img src="./packages/cascade-studio/icon/chiselmain.png" alt="The ChiselCAD IDE: the parametric chisel starter model in the 3D viewport alongside its JavaScript source" width="900">
 </p>
 
+<p align="center"><em>From napkin sketch to printed part — start to finish:</em></p>
+
+<p>This took 30 seconds. I probably spent longer drawing my crummy sketch than it took to make it and get it into Bambu studio to print.
+
+<p align="center">
+  <img src="./packages/cascade-studio/icon/sketch.webp" alt="A hand-drawn dot-grid sketch of the bracket with its key dimensions" height="185">
+  <img src="./packages/cascade-studio/icon/bracket-wide.jpg" alt="The bracket modeled parametrically in ChiselCAD, driven by labelled sliders in the control panel" height="185">
+  <img src="./packages/cascade-studio/icon/bracket.webp" alt="A clean matcap render of the finished bracket" height="185">
+  <img src="./packages/cascade-studio/icon/3dprint.webp" alt="The exported bracket laid out on the bed in a 3D-print slicer" height="185">
+</p>
+
+<p>(This process was done with Fable in the browser chat window - given information was the example chisel code + the sketch photo. No additional MCPs or skills needed)
+
 <p align="center">
   <img src="./packages/cascade-studio/icon/Variety.png" height="150">
   <img src="./packages/cascade-studio/icon/Fillet.png" height="150">
@@ -179,56 +192,10 @@ await page.evaluate(() => {
 });
 ```
 
-## Architecture
-
-An npm workspaces monorepo with two packages. (The on-disk package names are still `cascade-core` and `cascade-studio` from upstream; renaming them is part of the ongoing cleanup.)
-
-- **`cascade-core`** — Reusable CAD engine (no GUI dependencies): the Web Worker, OpenCascade WASM, and mesher.
-- **`cascade-studio`** — The browser IDE: Three.js viewport, Monaco editor, Tweakpane GUI, and the sketch/feature tooling.
-
-```
-packages/
-  cascade-core/
-    src/
-      engine/
-        CascadeEngine.js       ← Main-thread API wrapping Worker + MessageBus
-        MessageBus.js          ← Typed worker message routing
-      worker/
-        CascadeWorker.js       ← Web Worker entry; evaluates user code
-        StandardLibrary.js     ← CAD primitives (Box, Sphere, Sketch, etc.)
-        ShapeToMesh.js         ← OpenCascade shape → mesh triangulation
-        FileUtils.js           ← STEP/IGES/STL import/export
-      openscad/
-        OpenSCADTranspiler.js  ← OpenSCAD → JS transpiler
-      index.js                 ← Package entry point
-
-  cascade-studio/
-    src/
-      main.js                  ← ESM entry point
-      CascadeMain.js           ← App shell, Dockview layout
-      CascadeAPI.js            ← window.CascadeAPI for agent/programmatic use
-      CascadeView.js           ← 3D viewport (Three.js), modeling timeline
-      SketchMode.js            ← In-viewport sketching, constraints, feature bar
-      EditorManager.js         ← Monaco editor, live code evaluation
-      ConsoleManager.js        ← Console panel, log/error capture
-      GUIManager.js            ← Tweakpane GUI panel (sliders, checkboxes)
-    css/, textures/, icon/, lib/  ← Static assets
-
-test/                            ← Playwright tests (monorepo root)
-```
-
-The build system uses **esbuild**. `npm run build` builds `cascade-core` first (worker bundle + WASM + fonts), then `cascade-studio` (main app bundle + static assets), outputting to `packages/cascade-studio/dist/`.
-
-## Testing
-
-A Playwright suite covers primitives, transforms, booleans, operations, selectors, OpenSCAD, exports, and regression scenarios.
-
 ```bash
 npm run build
 npx playwright test    # 12 tests, ~25s
 ```
-
-WebGL rendering in headless mode requires `--use-gl=angle --use-angle=swiftshader` (configured in `playwright.config.js`). If Chromium is missing, run `npx playwright install chromium` first.
 
 ## Credits
 
