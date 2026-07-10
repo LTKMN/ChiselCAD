@@ -807,6 +807,24 @@ body {
   margin: 0;
 }
 
+.cs-vpset-select {
+  margin-left: auto;
+  background: var(--cs-bg-surface);
+  color: var(--cs-text-primary);
+  border: 1px solid var(--cs-border);
+  border-radius: 4px;
+  padding: 2px 4px;
+  font-size: 12px;
+  font-family: var(--cs-font-ui);
+  cursor: pointer;
+}
+
+.cs-vpset-select:hover,
+.cs-vpset-select:focus {
+  outline: none;
+  border-color: var(--cs-accent);
+}
+
 /* Highlight for GUI controls defined on the line under the editor cursor */
 .cs-gui-hot {
   outline: 1px solid var(--cs-accent);

@@ -179,7 +179,7 @@ class CascadeEnvironment {
     });
 
     // Viewport display settings (app-level, not per-model) — persisted locally
-    this._viewportSettings = { grid: true };
+    this._viewportSettings = { grid: true, gridScale: 10 };
     try {
       Object.assign(this._viewportSettings, JSON.parse(localStorage.getItem('chisel-viewport') || '{}'));
     } catch (e) { /* corrupted prefs — fall back to defaults */ }
@@ -732,6 +732,7 @@ class CascadeEnvironment {
   getSceneOptions() {
     return {
       gridVisible: this._viewportSettings.grid,
+      gridMinor: this._viewportSettings.gridScale,
     };
   }
 
@@ -751,16 +752,17 @@ class CascadeEnvironment {
     this.environment.scene.remove(this.grid);
     if (this.grid) { this.grid.material.dispose(); this.grid.geometry.dispose(); }
     if (sceneOptions.gridVisible) {
-      this.grid = CascadeEnvironment._makeInfiniteGrid(this._vtheme.grid, this._vtheme.gridAlpha);
+      this.grid = CascadeEnvironment._makeInfiniteGrid(
+        this._vtheme.grid, this._vtheme.gridAlpha, sceneOptions.gridMinor || 10);
       this.environment.scene.add(this.grid);
     }
   }
 
-  /** Blender-style infinite grid: a huge shader plane drawing 10mm minor and
-   *  100mm major lines, anti-aliased via screen-space derivatives and faded
-   *  radially with distance from the camera (which is what lets it read as
-   *  infinite without fog or a floor plane). */
-  static _makeInfiniteGrid(colorHex, opacity) {
+  /** Blender-style infinite grid: a huge shader plane drawing `minor`-spaced
+   *  minor lines and 10×-spaced major lines, anti-aliased via screen-space
+   *  derivatives and faded radially with distance from the camera (which is
+   *  what lets it read as infinite without fog or a floor plane). */
+  static _makeInfiniteGrid(colorHex, opacity, minor = 10.0) {
     const material = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
@@ -768,8 +770,8 @@ class CascadeEnvironment {
       uniforms: {
         uColor:     { value: new THREE.Color(colorHex) },
         uOpacity:   { value: opacity },
-        uSizeMinor: { value: 10.0 },
-        uSizeMajor: { value: 100.0 },
+        uSizeMinor: { value: minor },
+        uSizeMajor: { value: minor * 10.0 },
         uDistance:  { value: 4000.0 },
       },
       vertexShader: `
@@ -838,7 +840,12 @@ class CascadeEnvironment {
    *  corner. New display settings (matcap, SSAO, ...) slot into the defs list. */
   _createViewportSettingsOverlay() {
     const settingsDefs = [
-      { key: 'grid', label: 'Grid' },
+      { key: 'grid', label: 'Grid', type: 'checkbox' },
+      { key: 'gridScale', label: 'Grid scale', type: 'select', numeric: true, options: [
+        { value: 1, label: '1 mm' },
+        { value: 10, label: '10 mm' },
+        { value: 100, label: '100 mm' },
+      ] },
     ];
 
     const container = document.createElement('div');
@@ -858,18 +865,35 @@ class CascadeEnvironment {
       const row = document.createElement('label');
       row.className = 'cs-vpset-row';
 
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.checked = !!this._viewportSettings[def.key];
-      checkbox.addEventListener('change', () => {
-        this.setViewportSetting(def.key, checkbox.checked);
-      });
-
       const text = document.createElement('span');
       text.textContent = def.label;
 
-      row.appendChild(checkbox);
-      row.appendChild(text);
+      if (def.type === 'select') {
+        const select = document.createElement('select');
+        select.className = 'cs-vpset-select';
+        for (const opt of def.options) {
+          const o = document.createElement('option');
+          o.value = String(opt.value);
+          o.textContent = opt.label;
+          select.appendChild(o);
+        }
+        select.value = String(this._viewportSettings[def.key]);
+        select.addEventListener('change', () => {
+          this.setViewportSetting(def.key, def.numeric ? Number(select.value) : select.value);
+        });
+        row.appendChild(text);
+        row.appendChild(select);
+      } else {
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = !!this._viewportSettings[def.key];
+        checkbox.addEventListener('change', () => {
+          this.setViewportSetting(def.key, checkbox.checked);
+        });
+        row.appendChild(checkbox);
+        row.appendChild(text);
+      }
+
       popover.appendChild(row);
     }
 
