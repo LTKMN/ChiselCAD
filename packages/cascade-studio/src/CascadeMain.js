@@ -184,7 +184,11 @@ class CascadeStudioApp {
         window.workerWorking = false;
         // A failed first evaluation never reaches renderMeshData — don't
         // leave the startup spinner tumbling over the error
-        if (this.viewport) { this.viewport.dismissLoadingSpinner(); }
+        if (this.viewport) {
+          this.viewport.dismissLoadingSpinner();
+          this.viewport.disarmShake();       // no new model is coming
+          this.viewport.shake(0.4);          // the clang of hitting a wall
+        }
         console.error(payload);
       });
       this.engine.on('Progress', (payload) => {
@@ -640,16 +644,17 @@ let hr       = handleD / 2;          // handle radius at the swell
 let hz       = bladeLen + shankLen;  // height where the handle seats
 let ferruleR = Math.min(hr * 0.9, Math.max(hr * 0.72, shankR + 2));
 
-// --- Blade (Sketch in XZ plane + Extrude) ---
-// Side profile with a 25-degree cutting bevel at the tip
+// --- Blade (Sketch in YZ plane + Extrude) ---
+// Side profile with a 25-degree cutting bevel at the tip; the flat back
+// faces -Y so the stamped side greets the front view
 let bevelRise = bladeT / Math.tan(25 * Math.PI / 180);
-let bladeFace = new Sketch([0, 0], "XZ")
+let bladeFace = new Sketch([0, 0], "YZ")
   .LineTo([bladeT, bevelRise])   // cutting bevel
   .LineTo([bladeT, bladeLen])    // top side
   .LineTo([0, bladeLen])         // flat back
   .End(true).Face();
-let blade = Translate([-bladeT/2, -bladeW/2, 0],
-  Extrude(bladeFace, [0, bladeW, 0]));
+let blade = Translate([-bladeW/2, -bladeT/2, 0],
+  Extrude(bladeFace, [bladeW, 0, 0]));
 
 // ChamferEdges + Selector: ease the four long edges of the blade
 let longEdges = Edges(blade).parallel([0, 0, 1]).indices();
@@ -658,10 +663,10 @@ blade = ChamferEdges(blade, bladeT * 0.22, longEdges);
 // --- Neck (Loft): blend the rectangular blade into the round shank ---
 let neckLen = shankLen * 0.45;
 let rectWire = Polygon([
-  [ bladeT/2, -bladeW/2, bladeLen],
-  [ bladeT/2,  bladeW/2, bladeLen],
-  [-bladeT/2,  bladeW/2, bladeLen],
-  [-bladeT/2, -bladeW/2, bladeLen]], true);
+  [ bladeW/2, -bladeT/2, bladeLen],
+  [ bladeW/2,  bladeT/2, bladeLen],
+  [-bladeW/2,  bladeT/2, bladeLen],
+  [-bladeW/2, -bladeT/2, bladeLen]], true);
 let circWire = Translate([0, 0, bladeLen + neckLen], Circle(shankR, true));
 let neck = Loft([rectWire, circWire]);
 
@@ -685,9 +690,8 @@ let handle = Revolve(handleProfile, 360);
 
 // --- Width stamp (Text3D on the blade face) ---
 if (stamp) {
-  let label = Rotate([0, 0, 1], -90,
-    Text3D(Math.round(bladeW) + "", 7, 0.25, "Consolas"));
-  Translate([-(bladeT/2 + 0.5), 3.5, bladeLen * 0.9], label);
+  let label = Text3D(Math.round(bladeW) + "", 7, 0.25, "Consolas");
+  Translate([-3.5, -(bladeT/2 + 0.5), bladeLen * 0.9], label);
 }
 
 // --- Measurements ---

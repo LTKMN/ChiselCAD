@@ -120,9 +120,14 @@ class CascadeEnvironment {
     this.gizmoMode       = "translate";
     this.gizmoSpace      = "local";
 
+    // Screenshake magnitude (game juice), decays in _animate
+    this._shakeMag       = 0;
+    // Shake armed to fire when the next model render lands
+    this._pendingShake   = 0;
+
     // Viewport display settings (app-level, not per-model) — persisted
     // locally. Loaded before the matcap so the choice applies from frame one.
-    this._viewportSettings = { grid: true, gridScale: 10, matcap: DEFAULT_MATCAP };
+    this._viewportSettings = { grid: true, gridScale: 10, matcap: DEFAULT_MATCAP, juice: true };
     try {
       Object.assign(this._viewportSettings, JSON.parse(localStorage.getItem('chisel-viewport') || '{}'));
     } catch (e) { /* corrupted prefs — fall back to defaults */ }
@@ -308,6 +313,12 @@ class CascadeEnvironment {
       this._isFirstRender = false;
       this._fitOnNextRender = false;
       this.fitCamera();
+    }
+    // An armed commit-shake fires now, on the same frame the new model
+    // appears — kicking at commit time would land before the redraw
+    if (this._pendingShake) {
+      this.shake(this._pendingShake);
+      this._pendingShake = 0;
     }
     this.environment.viewDirty = true;
     console.log("Generation Complete!");
@@ -944,6 +955,7 @@ class CascadeEnvironment {
   _createViewportSettingsOverlay() {
     const settingsDefs = [
       { key: 'grid', label: 'Grid', type: 'checkbox' },
+      { key: 'juice', label: 'Screenshake', type: 'checkbox' },
       { key: 'gridScale', label: 'Grid scale', type: 'select', numeric: true, options: [
         { value: 1, label: '1 mm' },
         { value: 10, label: '10 mm' },
@@ -1332,10 +1344,53 @@ class CascadeEnvironment {
       }
     }
 
+    if (this._shakeMag > 0.001) { this.environment.viewDirty = true; }
+
     if (this.environment.viewDirty) {
-      this.environment.renderer.render(this.environment.scene, this.environment.camera);
+      // Screenshake: jitter the camera in its screen plane for this render
+      // only (offset → render → restore), so the real camera/controls state
+      // is never touched. Amplitude scales with orbit distance so the kick
+      // feels the same at any zoom; exponential decay ≈ a third of a second.
+      const cam = this.environment.camera;
+      let shakeOffset = null;
+      if (this._shakeMag > 0.001) {
+        const dist = cam.position.distanceTo(this.environment.controls.target);
+        const amp = dist * 0.012 * this._shakeMag;
+        const right = new THREE.Vector3().setFromMatrixColumn(cam.matrix, 0);
+        const up = new THREE.Vector3().setFromMatrixColumn(cam.matrix, 1);
+        shakeOffset = right.multiplyScalar((Math.random() * 2 - 1) * amp)
+          .add(up.multiplyScalar((Math.random() * 2 - 1) * amp));
+        cam.position.add(shakeOffset);
+        this._shakeMag *= 0.82;
+        if (this._shakeMag < 0.001) { this._shakeMag = 0; }
+      }
+      this.environment.renderer.render(this.environment.scene, cam);
+      if (shakeOffset) { cam.position.sub(shakeOffset); }
       this.environment.viewDirty = false;
     }
+  }
+
+  /** Kick off a decaying screenshake (game juice). intensity 1 ≈ a solid
+   *  thunk; values stack by taking the max, not adding. Respects the OS
+   *  reduced-motion preference. */
+  shake(intensity = 1) {
+    if (!this._viewportSettings.juice) { return; }
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) { return; }
+    this._shakeMag = Math.max(this._shakeMag || 0, intensity);
+    this.environment.viewDirty = true;
+  }
+
+  /** Arm a shake that fires when the next model render lands. Use for
+   *  commits: evaluation is async, so an immediate shake() would kick
+   *  before the model visibly changes and the impact reads as unrelated. */
+  shakeOnNextRender(intensity = 1) {
+    this._pendingShake = Math.max(this._pendingShake, intensity);
+  }
+
+  /** Cancel an armed shake (e.g. the evaluation errored — no new model is
+   *  coming, and the charge shouldn't fire on some later unrelated render). */
+  disarmShake() {
+    this._pendingShake = 0;
   }
 }
 

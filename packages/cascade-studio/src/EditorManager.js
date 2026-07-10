@@ -26,6 +26,8 @@ class EditorManager {
     this._evalInFlight = false;
     // Debounce timer for live evaluation while typing
     this._liveEvalTimer = null;
+    // Resolution of the mesh currently on screen (refine-ladder state)
+    this._lastMeshedRes = Infinity;
     // Suppresses live evaluation during programmatic setValue calls — those
     // paths (project load, mode switch, runCode) evaluate explicitly themselves
     this._suppressLiveEval = false;
@@ -118,7 +120,15 @@ class EditorManager {
       this.clearLineageHighlight();
       if (this._suppressLiveEval) { return; }
       clearTimeout(this._liveEvalTimer);
-      this._liveEvalTimer = setTimeout(() => { this.evaluateCode(); }, 600);
+      clearTimeout(this._refineTimer);  // don't let a refine wedge in front of the coming eval
+      this._liveEvalTimer = setTimeout(() => {
+        // Code-edit juice: a light kick when the regenerated model lands
+        // (commits arm a stronger one — max wins). Errors disarm it.
+        if (this._app.viewport) { this._app.viewport.shakeOnNextRender(0.3); }
+        // Typing evals mesh at draft res for fast feedback; the refine
+        // ladder sharpens to REST_RES then FINE_RES once you pause
+        this.evaluateCode(false, { draft: true });
+      }, 600);
     });
 
     // Cursor-line highlighting: light up the GUI control / 3D geometry that
@@ -349,7 +359,8 @@ class EditorManager {
     }).then((result) => {
       if (this._app.viewport && result.meshData) {
         this._app.viewport.renderMeshData(result.meshData, result.sceneOptions, result.shapeRanges);
-        if (!draft) { this._scheduleRefine(performance.now() - evalStart); }
+        this._lastMeshedRes = draft ? EditorManager.DRAFT_RES : EditorManager.REST_RES;
+        this._scheduleRefine(performance.now() - evalStart);
       }
     }).catch((err) => {
       console.error("Evaluation error: " + err.message);
@@ -387,28 +398,41 @@ class EditorManager {
     console.log("Generating Model");
   }
 
-  /** After a normal-resolution render, quietly re-mesh the same shapes at
-   *  FINE_RES once nothing else has happened for a beat. Skipped for heavy
-   *  models (slow rest eval) — the worker is single-threaded, so a long
-   *  refine would stall the next interaction behind it. The refine result
-   *  is discarded if a new evaluation starts while it's in flight (the
-   *  worker serializes messages, so the new eval's mesh always lands last
-   *  anyway — this just avoids a stale flash). */
-  _scheduleRefine(restEvalMs) {
-    if (restEvalMs > 5000) { return; }
+  /** Progressive refinement ladder: after any render, quietly re-mesh the
+   *  same shapes one rung sharper once nothing else is happening — draft
+   *  evals climb to REST_RES quickly (350ms), then to FINE_RES after a
+   *  fuller pause (1s). Only meshing repeats; the code is not re-evaluated.
+   *  The FINE rung is skipped for heavy models (slow last meshing) — the
+   *  worker is single-threaded, so a long refine would stall the next edit
+   *  behind it. A refine result is discarded if a new evaluation starts
+   *  while it's in flight (the worker serializes messages, so the new
+   *  eval's mesh always lands last anyway — this just avoids a stale flash). */
+  _scheduleRefine(lastMeshMs = 0) {
+    const next = this._lastMeshedRes > EditorManager.REST_RES ? EditorManager.REST_RES
+               : this._lastMeshedRes > EditorManager.FINE_RES ? EditorManager.FINE_RES
+               : null;
+    if (next === null) { return; }
+    if (next === EditorManager.FINE_RES && lastMeshMs > 5000) { return; }
     clearTimeout(this._refineTimer);
     this._refineTimer = setTimeout(() => {
       if (this._evalInFlight || this._queuedEval || window.workerWorking) { return; }
+      const t0 = performance.now();
       this._app.engine.remesh(
-        EditorManager.FINE_RES,
+        next,
         this._app.viewport ? this._app.viewport.getSceneOptions() : undefined
       ).then((result) => {
         if (this._evalInFlight || this._queuedEval) { return; } // superseded
         if (this._app.viewport && result.meshData) {
+          // No shake here — refinement should sharpen silently; a kick a
+          // second after the user went idle reads as an errant glitch
           this._app.viewport.renderMeshData(result.meshData, result.sceneOptions, result.shapeRanges);
+          this._lastMeshedRes = next;
+          if (next !== EditorManager.FINE_RES) {
+            this._scheduleRefine(performance.now() - t0);  // climb to the next rung
+          }
         }
-      }).catch(() => { /* worker busy or timeout — the rest-res mesh stands */ });
-    }, 1000);
+      }).catch(() => { /* worker busy or timeout — the current mesh stands */ });
+    }, next === EditorManager.REST_RES ? 350 : 1000);
   }
 
   /** Set editor mode: 'cascadestudio' or 'openscad'. */

@@ -150,8 +150,12 @@ function RemoveInternalEdges(shape: oc.TopoDS_Shape, keepShape?: boolean) : oc.T
  * @example```let box = Extrude(Polygon([[0,0,0],[50,0,0],[25,50,0]]), [0,0,50]);```
  * @example```let tray = Extrude(outerFace, [0,0,30], true);  // keepFace for Offset```
  * @example```let hole = Extrude(faceSketch, -12);  // scalar = along face normal```
- * @example```Difference(body, [Extrude(faceSketch, [0.5, -12])]);  // clean cut, no sliver```*/
-function Extrude(face: oc.TopoDS_Shape, direction: number[] | number, keepFace?: boolean) : oc.TopoDS_Shape;
+ * @example```Difference(body, [Extrude(faceSketch, [0.5, -12])]);  // clean cut, no sliver```
+ *
+ * An ARRAY of faces (a multi-region sketch group) extrudes as one feature:
+ * each region gets its own prism and the result is a single compound solid.
+ * @example```let grid = Extrude([sketchA, sketchB, sketchC], 10);  // one feature, three islands```*/
+function Extrude(face: oc.TopoDS_Shape | oc.TopoDS_Shape[], direction: number[] | number, keepFace?: boolean) : oc.TopoDS_Shape;
 
 /** Extrudes and twists a flat wire upwards along the z-axis.
  * The original wire is removed unless `keepWire` is true.

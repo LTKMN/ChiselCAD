@@ -591,8 +591,32 @@ function Intersection(objectsToIntersect, keepObjects, fuzzValue, keepEdges) {
 
 // --- Extrusion and Shape Generation ---
 
+/** Build one prism from a face. Direction forms:
+ *  scalar → along the face's own normal (negative = into the body);
+ *  span [start, end] → along the normal from start to end (overshoot idiom
+ *  for boolean tools on body faces — see Extrude's comment);
+ *  3-vector → as given. */
+function _extrudePrism(face, direction) {
+  let dir = direction, startVec = null;
+  if (typeof direction === 'number' ||
+      (self.isArrayLike(direction) && direction.length === 2)) {
+    let n = _faceNormal(face);
+    let start = typeof direction === 'number' ? 0 : direction[0];
+    let end = typeof direction === 'number' ? direction : direction[1];
+    dir = [n[0] * (end - start), n[1] * (end - start), n[2] * (end - start)];
+    if (start !== 0) { startVec = [n[0] * start, n[1] * start, n[2] * start]; }
+  }
+  let base = face;
+  if (startVec) {
+    let trsf = new self.oc.gp_Trsf_1();
+    trsf.SetTranslation_1(new self.oc.gp_Vec_4(startVec[0], startVec[1], startVec[2]));
+    base = face.Moved(new self.oc.TopLoc_Location_4(trsf), false);
+  }
+  return new self.oc.BRepPrimAPI_MakePrism_1(base,
+    new self.oc.gp_Vec_4(dir[0], dir[1], dir[2]), false, true).Shape();
+}
+
 function Extrude(face, direction, keepFace) {
-  if (!face || face.IsNull()) { console.error("Extrude: input shape is null! Was it consumed by a previous operation? Use keepFace/keepShape to preserve shapes for reuse."); return face; }
   // Scalar distance → extrude along the face's own normal (handy for sketches
   // on tilted/baked planes, where a literal direction vector would be
   // illegible). Negative distance extrudes into the body.
@@ -604,25 +628,40 @@ function Extrude(face, direction, keepFace) {
   // z-fighting). Overshooting sidesteps the tangency entirely:
   //   Extrude(sk, [0.5, -12])   cut tool: starts 0.5 proud, cuts 12 deep
   //   Extrude(sk, [-0.5, 20])   boss: root buried 0.5, rises 20
-  let dir = direction, startVec = null;
-  if (typeof direction === 'number' ||
-      (self.isArrayLike(direction) && direction.length === 2)) {
-    let n = _faceNormal(face);
-    let start = typeof direction === 'number' ? 0 : direction[0];
-    let end = typeof direction === 'number' ? direction : direction[1];
-    dir = [n[0] * (end - start), n[1] * (end - start), n[2] * (end - start)];
-    if (start !== 0) { startVec = [n[0] * start, n[1] * start, n[2] * start]; }
-  }
-  let curExtrusion = self.CacheOp(arguments, "Extrude", () => {
-    let base = face;
-    if (startVec) {
-      let trsf = new self.oc.gp_Trsf_1();
-      trsf.SetTranslation_1(new self.oc.gp_Vec_4(startVec[0], startVec[1], startVec[2]));
-      base = face.Moved(new self.oc.TopLoc_Location_4(trsf), false);
+  //
+  // A multi-region sketch is an ARRAY of faces (one disjoint island each):
+  // every region gets its own prism and the result is one compound solid,
+  // so the whole sketch extrudes/cuts as a single feature.
+  if (self.isArrayLike(face) && typeof face[0] === 'object' &&
+      face[0] !== null && !self.isArrayLike(face[0])) {
+    const group = face;
+    for (let i = 0; i < group.length; i++) {
+      if (!group[i] || group[i].IsNull()) {
+        console.error("Extrude: face " + i + " of the sketch group is null! Was it consumed by a previous operation?");
+        return null;
+      }
     }
-    return new self.oc.BRepPrimAPI_MakePrism_1(base,
-      new self.oc.gp_Vec_4(dir[0], dir[1], dir[2]), false, true).Shape();
-  });
+    let curCompound = self.CacheOp(arguments, "Extrude", () => {
+      let compound = new self.oc.TopoDS_Compound();
+      let builder = new self.oc.BRep_Builder();
+      builder.MakeCompound(compound);
+      for (let i = 0; i < group.length; i++) {
+        builder.Add(compound, _extrudePrism(group[i], direction));
+      }
+      return compound;
+    });
+    if (!keepFace) {
+      for (let i = 0; i < group.length; i++) {
+        self.sceneShapes = self.Remove(self.sceneShapes, group[i]);
+      }
+    }
+    self.sceneShapes.push(curCompound);
+    return curCompound;
+  }
+
+  if (!face || face.IsNull()) { console.error("Extrude: input shape is null! Was it consumed by a previous operation? Use keepFace/keepShape to preserve shapes for reuse."); return face; }
+  let curExtrusion = self.CacheOp(arguments, "Extrude",
+    () => _extrudePrism(face, direction));
 
   if (!keepFace) { self.sceneShapes = self.Remove(self.sceneShapes, face); }
   self.sceneShapes.push(curExtrusion);

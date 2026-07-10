@@ -306,6 +306,7 @@ class SketchMode {
     if (commit && this.entities.length > 0) {
       const code = this._emitCode();
       this._app.editor.appendCode(code);
+      if (this._vp) { this._vp.shakeOnNextRender(1); }  // thunk when the model lands
     }
 
     this.active = false;
@@ -713,13 +714,16 @@ class SketchMode {
   /** Sketch variables declared at the top level, in order: [{name, plane}].
    *  Line-start anchored so block-scoped declarations don't leak in. */
   _findSketches(code) {
-    const seen = new Map(); // name → plane, insertion order = recency
-    const re = /^let\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+Sketch\s*\(\s*\[[^\]]*\]\s*(?:,\s*(?:['"](XY|XZ|YZ)['"]|(\{)))?/gm;
+    const seen = new Map(); // name → {plane, group}, insertion order = recency
+    // Matches `let s = new Sketch(...)` and the multi-region group form
+    // `let s = [  // comment\n  new Sketch(...)`; plane comes from the
+    // first region. group=true marks an array-of-faces sketch.
+    const re = /^let\s+([A-Za-z_$][\w$]*)\s*=\s*(\[\s*(?:\/\/[^\n]*\s*)?)?new\s+Sketch\s*\(\s*\[[^\]]*\]\s*(?:,\s*(?:['"](XY|XZ|YZ)['"]|(\{)))?/gm;
     for (const m of code.matchAll(re)) {
       seen.delete(m[1]);
-      seen.set(m[1], m[2] || (m[3] ? 'custom' : 'XY'));
+      seen.set(m[1], { plane: m[3] || (m[4] ? 'custom' : 'XY'), group: !!m[2] });
     }
-    return [...seen.entries()].map(([name, plane]) => ({ name, plane }));
+    return [...seen.entries()].map(([name, v]) => ({ name, plane: v.plane, group: v.group }));
   }
 
   /** Solid/shape variables assigned at the top level, ordered by their most
@@ -787,6 +791,7 @@ class SketchMode {
       }
       case 'revolve': {
         if (!lastSk) { return this._flashHint('Revolve needs a sketch — draw one first'); }
+        if (lastSk.group) { return this._flashHint('Revolve needs a single-region sketch — this one has several islands'); }
         if (lastSk.plane === 'XY') {
           snippet = `// XY profiles revolve around X (revolving around Z would give a flat disk)\n` +
                     `let ${nv('solid')} = Revolve(${lastSk.name}, 360, [1, 0, 0]);`;
@@ -799,11 +804,13 @@ class SketchMode {
       case 'loft': {
         if (sketches.length < 2) { return this._flashHint('Loft needs two sketches (profiles at different positions)'); }
         const a = sketches[sketches.length - 2];
+        if (a.group || lastSk.group) { return this._flashHint('Loft needs single-region sketches — one of these has several islands'); }
         snippet = `let ${nv('solid')} = Loft([GetWire(${a.name}), GetWire(${lastSk.name})]);`;
         break;
       }
       case 'pipe': {
         if (!lastSk) { return this._flashHint('Pipe needs a sketch profile — draw one first'); }
+        if (lastSk.group) { return this._flashHint('Pipe needs a single-region sketch profile — this one has several islands'); }
         const paths = {
           XY: '[[0, 0, 0], [0, 0, 30], [20, 0, 60]]',
           XZ: '[[0, 0, 0], [0, -30, 0], [20, -60, 0]]',
@@ -816,7 +823,10 @@ class SketchMode {
       }
     }
 
-    if (snippet) { this._app.editor.appendCode(snippet, select); }
+    if (snippet) {
+      this._app.editor.appendCode(snippet, select);
+      if (this._vp) { this._vp.shakeOnNextRender(0.5); }  // thunk when the model lands
+    }
   }
 
   // =====================================================================
@@ -877,7 +887,18 @@ class SketchMode {
     const model = this._app.editor.editor.getModel();
     const lineText = (info.definingLine <= model.getLineCount())
       ? model.getLineContent(info.definingLine) : '';
-    const m = lineText.match(/^\s*(?:let|const|var)?\s*([A-Za-z_$][\w$]*)\s*=/);
+    let m = lineText.match(/^\s*(?:let|const|var)?\s*([A-Za-z_$][\w$]*)\s*=/);
+    if (!m) {
+      // Maybe a region of a multi-region sketch group: its defining line is
+      // a continuation line inside `let name = [ ... ];` — walk up to the
+      // array opener, stopping at any earlier statement's terminating `;`
+      for (let ln = info.definingLine - 1; ln >= Math.max(1, info.definingLine - 60); ln--) {
+        const t = model.getLineContent(ln);
+        if (/;\s*(?:\/\/[^\n]*)?$/.test(t)) { break; }
+        const g = t.match(/^\s*(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\[\s*(?:\/\/[^\n]*)?$/);
+        if (g) { m = g; break; }
+      }
+    }
     if (!m) {
       this._flashHint(`That shape isn't assigned to a variable (line ${info.definingLine}) — give it a name first`);
       this._hint.style.display = '';
@@ -950,7 +971,10 @@ class SketchMode {
         break;
     }
 
-    if (snippet) { this._app.editor.appendCode(snippet, select); }
+    if (snippet) {
+      this._app.editor.appendCode(snippet, select);
+      if (this._vp) { this._vp.shakeOnNextRender(0.5); }  // thunk when the model lands
+    }
   }
 
   setTool(id) {
@@ -3010,12 +3034,14 @@ class SketchMode {
       }
     }
 
-    let idx = this._nextSketchIndex();
+    // One region expression per disjoint island. However many there are,
+    // the whole commit becomes ONE sketch variable — a multi-region sketch
+    // emits an array of faces, which Extrude treats as a single feature.
+    const regions = [];
     for (const chain of chains) {
-      const name = `sketch${idx++}`;
       const v0 = chain.segs[0].from;
       if (!chain.closed) { out.push(`// note: open profile — End(true) closes it back to the start point`); }
-      let s = `let ${name} = new Sketch([${fmt(v0[0])}, ${fmt(v0[1])}]${planeArg})`;
+      let s = `new Sketch([${fmt(v0[0])}, ${fmt(v0[1])}]${planeArg})`;
       for (const seg of chain.segs) {
         if (seg.ent.type === 'line') {
           s += `\n  .LineTo(${this._lineEndExpr(seg)})`;
@@ -3030,14 +3056,22 @@ class SketchMode {
         const rExpr = hole.rVar || fmt(hole.r);
         s += `\n  .Circle([${fmt(hole.c[0])}, ${fmt(hole.c[1])}], ${rExpr}, true)`;
       }
-      s += `.Face();`;
-      out.push(s);
+      s += `.Face()`;
+      regions.push(s);
     }
 
     for (const c of standalone) {
-      const name = `sketch${idx++}`;
       const rExpr = c.rVar || fmt(c.r);
-      out.push(`let ${name} = new Sketch([${fmt(c.c[0])}, ${fmt(c.c[1])}]${planeArg}).Circle([${fmt(c.c[0])}, ${fmt(c.c[1])}], ${rExpr}).Face();`);
+      regions.push(`new Sketch([${fmt(c.c[0])}, ${fmt(c.c[1])}]${planeArg}).Circle([${fmt(c.c[0])}, ${fmt(c.c[1])}], ${rExpr}).Face()`);
+    }
+
+    const name = `sketch${this._nextSketchIndex()}`;
+    if (regions.length === 1) {
+      out.push(`let ${name} = ${regions[0]};`);
+    } else if (regions.length > 1) {
+      out.push(`let ${name} = [  // ${regions.length} regions — one profile group`);
+      out.push(regions.map(r => '  ' + r.replace(/\n/g, '\n  ')).join(',\n') + ',');
+      out.push(`];`);
     }
 
     return out.join('\n');
