@@ -2,10 +2,13 @@
 // It is also in charge of saving to STL and OBJ
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js';
 import { HandleManager } from './CascadeViewHandles.js';
 import { VIEWPORT_DEFAULTS } from './ThemeManager.js';
+
+const DEFAULT_MATCAP = 'ceramic_lightbulb.png';
 
 /** Base class for a 3D viewport environment.
  *  Includes infinite grid, camera, lights, and orbit controls. */
@@ -117,12 +120,17 @@ class CascadeEnvironment {
     this.gizmoMode       = "translate";
     this.gizmoSpace      = "local";
 
-    // Load the Shiny Dull Metal Matcap Material
+    // Viewport display settings (app-level, not per-model) — persisted
+    // locally. Loaded before the matcap so the choice applies from frame one.
+    this._viewportSettings = { grid: true, gridScale: 10, matcap: DEFAULT_MATCAP };
+    try {
+      Object.assign(this._viewportSettings, JSON.parse(localStorage.getItem('chisel-viewport') || '{}'));
+    } catch (e) { /* corrupted prefs — fall back to defaults */ }
+
+    // Load the matcap material (selection lives in the viewport settings)
     this.loader = new THREE.TextureLoader();
     this.loader.setCrossOrigin('');
-    this.matcap = this.loader.load('./textures/dullFrontLitMetal.png', () => {
-      this.environment.viewDirty = true;
-    });
+    this.matcap = this._loadMatcapTexture(this._viewportSettings.matcap);
     this.matcapMaterial = new THREE.MeshMatcapMaterial({
       color: new THREE.Color(0xf5f5f5),
       matcap: this.matcap,
@@ -178,12 +186,6 @@ class CascadeEnvironment {
       this._jumpToCodeAtMouse(e);
     });
 
-    // Viewport display settings (app-level, not per-model) — persisted locally
-    this._viewportSettings = { grid: true, gridScale: 10 };
-    try {
-      Object.assign(this._viewportSettings, JSON.parse(localStorage.getItem('chisel-viewport') || '{}'));
-    } catch (e) { /* corrupted prefs — fall back to defaults */ }
-
     // Create the timeline overlay DOM
     this._createTimelineOverlay();
 
@@ -193,14 +195,82 @@ class CascadeEnvironment {
     // Initialize the Handle Manager (no messageBus needed — app wires events)
     this.handleManager = new HandleManager(this);
 
+    // Pure-Three.js loading indicator: lives in the scene from frame one,
+    // long before the OCCT worker has finished fetching/compiling the WASM
+    this._createLoadingSpinner();
+
     // Start the animation loop
     this._animate();
     this.environment.renderer.render(this.environment.scene, this.environment.camera);
   }
 
+  /** A gyroscope model spinning at the orbit target while the kernel warms
+   *  up: gyro_main revolves about vertical Y, its child gyro_sub spins on
+   *  its horizontal axle. Dismissed by the first real mesh render or an
+   *  engine error. Falls back to procedural rings if the glb fails. */
+  _createLoadingSpinner() {
+    // Headless tests render via swiftshader — a continuously-animating
+    // spinner burns a CPU core per worker and starves the WASM compile
+    if (navigator.webdriver) { return; }
+    new GLTFLoader().load('./icon/gyroscope.glb', (gltf) => {
+      if (this._spinnerDismissed) { return; }
+      const model = gltf.scene;
+      // Re-dress in the app's matcap shading, tinted with the glb's own
+      // colors — the exported chrome is fully metallic, which renders
+      // near-black without an environment map
+      model.traverse((o) => {
+        if (!o.isMesh) { return; }
+        const tint = (o.material && o.material.color) || new THREE.Color(0xf5f5f5);
+        o.material = new THREE.MeshMatcapMaterial({ color: tint, matcap: this.matcap });
+      });
+      this._spinnerMain = model.getObjectByName('gyro_main');
+      this._spinnerSub  = model.getObjectByName('gyro_sub');
+      this._mountSpinner(model, 12);
+    }, undefined, () => {
+      if (this._spinnerDismissed) { return; }
+      // Fallback: three nested tumbling rings
+      const rings = new THREE.Group();
+      const mat = new THREE.MeshLambertMaterial({
+        color: new THREE.Color(this._vtheme.glow),
+        transparent: true,
+        opacity: 0.85,
+      });
+      for (const r of [30, 23, 16]) {
+        rings.add(new THREE.Mesh(new THREE.TorusGeometry(r, 1.1, 12, 64), mat));
+      }
+      this._mountSpinner(rings, 1);
+    });
+  }
+
+  _mountSpinner(model, scale) {
+    const group = new THREE.Group();
+    group.name = "Loading Spinner";
+    group.add(model);
+    group.scale.setScalar(scale);
+    group.position.copy(this.environment.controls.target);
+    this._spinner = group;
+    this.environment.scene.add(group);
+    this.environment.viewDirty = true;
+  }
+
+  /** Remove the loading spinner, if it's still up (idempotent). The flag
+   *  also stops a glb that finishes loading after dismissal from mounting. */
+  dismissLoadingSpinner() {
+    this._spinnerDismissed = true;
+    if (!this._spinner) { return; }
+    this.environment.scene.remove(this._spinner);
+    this._spinner.traverse((o) => {
+      if (o.geometry) { o.geometry.dispose(); }
+      if (o.material) { o.material.dispose(); }
+    });
+    this._spinner = this._spinnerMain = this._spinnerSub = null;
+    this.environment.viewDirty = true;
+  }
+
   /** Render mesh data received from the engine.
    *  Replaces the old _registerRenderCallback / "combineAndRenderShapes" handler. */
   renderMeshData(meshData, sceneOptions, shapeRanges) {
+    this.dismissLoadingSpinner();  // the real 3D has arrived
     if (!meshData) return;
     const { faces: facelist, edges: edgelist } = meshData;
     window.workerWorking = false;
@@ -314,9 +384,12 @@ class CascadeEnvironment {
    *  an axis view at its current distance. Directions are Three world axes;
    *  in OCC terms top looks down -Z, front looks from -Y, right from +X. */
   setViewPreset(name) {
+    // `up` shapes the tween's roll; `pole` marks views that land on the
+    // orbit pole and gives the horizontal bias that keeps their on-screen
+    // roll when camera.up is reset to world up afterward (see tween end).
     const VIEWS = {
-      top:    { dir: [0, 1, 0],  up: [0, 0, -1] },
-      bottom: { dir: [0, -1, 0], up: [0, 0, -1] },  // X mirrors, like Blender
+      top:    { dir: [0, 1, 0],  up: [0, 0, -1], pole: [0, 0, 1] },
+      bottom: { dir: [0, -1, 0], up: [0, 0, -1], pole: [0, 0, -1] },  // X mirrors, like Blender
       front:  { dir: [0, 0, 1],  up: [0, 1, 0] },
       back:   { dir: [0, 0, -1], up: [0, 1, 0] },
       right:  { dir: [1, 0, 0],  up: [0, 1, 0] },
@@ -350,7 +423,19 @@ class CascadeEnvironment {
       cam.up.lerpVectors(up0, up1, k).normalize();
       cam.lookAt(target);
       env.viewDirty = true;
-      if (k < 1) { requestAnimationFrame(step); } else { ctl.update(); }
+      if (k < 1) { requestAnimationFrame(step); }
+      else {
+        // Land turntable-clean: OrbitControls orbits around world +Y but
+        // rolls the view to honor camera.up, so a non-world up left here
+        // makes every later orbit fight the user. Top/bottom sit on the
+        // orbit pole where world up is degenerate — bias the camera a hair
+        // toward the horizontal direction that reproduces the roll the
+        // tween just landed on, so the reset is invisible.
+        if (v.pole) { cam.position.addScaledVector(new THREE.Vector3(...v.pole), dist * 1e-4); }
+        cam.up.set(0, 1, 0);
+        cam.lookAt(target);
+        ctl.update();
+      }
     };
     requestAnimationFrame(step);
   }
@@ -742,9 +827,27 @@ class CascadeEnvironment {
     try {
       localStorage.setItem('chisel-viewport', JSON.stringify(this._viewportSettings));
     } catch (e) { /* private mode etc. — setting still applies this session */ }
+    if (key === 'matcap') {
+      // The face material is shared by every mesh, so swapping its matcap
+      // restyles the whole scene (model, history previews) in place
+      this.matcap = this._loadMatcapTexture(value);
+      this.matcapMaterial.matcap = this.matcap;
+      this.matcapMaterial.needsUpdate = true;
+    }
     this._updateGroundAndGrid(this.getSceneOptions());
     this._lastSceneOptions = this.getSceneOptions();
     this.environment.viewDirty = true;
+  }
+
+  /** Load a matcap texture by filename; a failed load (e.g. a stale
+   *  persisted setting after a texture is renamed) reverts to the default. */
+  _loadMatcapTexture(file) {
+    return this.loader.load('./textures/' + file,
+      () => { this.environment.viewDirty = true; },
+      undefined,
+      () => {
+        if (file !== DEFAULT_MATCAP) { this.setViewportSetting('matcap', DEFAULT_MATCAP); }
+      });
   }
 
   /** (Re)create or remove the infinite grid to match sceneOptions. */
@@ -845,6 +948,17 @@ class CascadeEnvironment {
         { value: 1, label: '1 mm' },
         { value: 10, label: '10 mm' },
         { value: 100, label: '100 mm' },
+      ] },
+      { key: 'matcap', label: 'Material', type: 'select', options: [
+        { value: DEFAULT_MATCAP, label: 'Ceramic bright' },
+        { value: 'ceramic_dark.png', label: 'Ceramic dark' },
+        { value: 'dullFrontLitMetal.png', label: 'Dull metal' },
+        { value: 'fullmetal.png', label: 'Full metal' },
+        { value: 'metal_bronze.png', label: 'Bronze' },
+        { value: 'clay_green.png', label: 'Clay green' },
+        { value: 'hard_surface_red.png', label: 'Hard surface red' },
+        { value: 'basic_side.png', label: 'Basic side' },
+        { value: 'check_normal+y.png', label: 'Normal check' },
       ] },
     ];
 
@@ -1159,6 +1273,22 @@ class CascadeEnvironment {
     if (!this.active) { return; }
 
     requestAnimationFrame(() => this._animate());
+
+    if (this._spinner) {
+      const t = performance.now() / 1000;
+      if (this._spinnerMain) {
+        // Gyroscope: slow precession about vertical Y, fast rotor on the
+        // sub's horizontal axle
+        this._spinnerMain.rotation.y = t * 0.7;
+        this._spinnerSub.rotation.z = t * 2.8;
+      } else {
+        const [a, b, c] = this._spinner.children[0].children;
+        a.rotation.set(t * 1.3, t * 0.7, 0);
+        b.rotation.set(-t * 0.9, 0, t * 1.1);
+        c.rotation.set(0, t * 1.2, -t * 0.8);
+      }
+      this.environment.viewDirty = true;
+    }
 
     if (this.mainObject && !this.sketchActive) {
       this.raycaster.setFromCamera(this.mouse, this.environment.camera);

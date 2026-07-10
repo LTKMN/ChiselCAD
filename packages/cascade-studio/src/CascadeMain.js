@@ -116,6 +116,16 @@ class CascadeStudioApp {
       const t = e.target;
       const inMonaco = !!(t && t.closest && t.closest('.monaco-editor'));
       if (t && !inMonaco && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) { return; }
+
+      // ESC backs out of selection: clears the shape-lineage tint, the 3D
+      // highlight overlay, and the hot GUI control. Handled before the
+      // Monaco routing check — clicking a shape focuses the editor, and ESC
+      // is how you let go. Sketch mode owns ESC via its own handler.
+      if (e.key === 'Escape' && !(this.sketchMode && this.sketchMode.active)) {
+        this.editor.clearShapeHighlights();
+        return;
+      }
+
       const canvas = this.viewport && this.viewport.environment
         && this.viewport.environment.renderer.domElement;
       if (inMonaco && !(canvas && canvas.matches(':hover'))) { return; } // actually typing code
@@ -172,6 +182,9 @@ class CascadeStudioApp {
       this.engine.on('log', (payload) => { console.log(payload); });
       this.engine.on('error', (payload) => {
         window.workerWorking = false;
+        // A failed first evaluation never reaches renderMeshData — don't
+        // leave the startup spinner tumbling over the error
+        if (this.viewport) { this.viewport.dismissLoadingSpinner(); }
         console.error(payload);
       });
       this.engine.on('Progress', (payload) => {

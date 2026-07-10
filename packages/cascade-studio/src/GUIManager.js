@@ -43,7 +43,9 @@ class GUIManager {
       // Live update: re-evaluate on every tick while dragging. keepGUI leaves
       // the pane intact so the slider isn't destroyed under the pointer, and
       // evaluateCode coalesces ticks that arrive while the kernel is busy.
-      slider.on('change', () => { this._delayReload({ keepGUI: true }); });
+      // Mid-drag ticks mesh at draft resolution; the release tick (ev.last)
+      // meshes at normal resolution and later refines in the background.
+      slider.on('change', (ev) => { this._delayReload({ keepGUI: true, draft: !ev.last }); });
     };
 
     this._handlers["addButton"] = (payload) => {
@@ -144,7 +146,8 @@ class GUIManager {
       this._app.engine.clearCache();
       this._app.editor.evaluateCode(true);
     } });
-    this._handlers["addSlider"]({ name: "MeshRes", default: 0.1, min: 0.01, max: 2, step: 0.01, dp: 2 });
+    // (MeshRes slider removed — resolution is automatic now: draft while
+    // dragging sliders, normal at rest, fine via background refinement.)
     this._userGui = true;
   }
 

@@ -91,6 +91,26 @@ class CascadeEngine {
     };
   }
 
+  /** Re-triangulate the current scene shapes at a different resolution
+   *  WITHOUT re-evaluating code (the worker meshes the shapes it already
+   *  holds). Same return shape as evaluate(). Used for background
+   *  refinement after a draft/normal-resolution render. */
+  async remesh(maxDeviation, sceneOptions) {
+    const result = await this._messageBus.request('combineAndRenderShapes', {
+      maxDeviation,
+      sceneOptions: sceneOptions || {}
+    }, 120000);
+
+    if (!result) return { meshData: null, sceneOptions: {}, shapeRanges: [] };
+
+    const [[faces, edges], resultSceneOptions, shapeRanges] = result;
+    return {
+      meshData: { faces, edges },
+      sceneOptions: resultSceneOptions || {},
+      shapeRanges: shapeRanges || []
+    };
+  }
+
   /** Triangulate and return mesh data for a specific history step. */
   async meshHistoryStep(stepIndex, maxDeviation = 0.1) {
     return this._messageBus.request('meshHistoryStep', {

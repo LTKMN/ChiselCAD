@@ -4,6 +4,13 @@ const monaco = window.monaco;
 
 /** Manages the Monaco code editor instance, mode switching, and code evaluation. */
 class EditorManager {
+  // Automatic mesh resolution (maxDeviation, mm): coarse while a slider is
+  // mid-drag, normal for every settled evaluation (typing, release tick),
+  // fine for the debounced background re-mesh once things go quiet.
+  static DRAFT_RES = 1.0;
+  static REST_RES = 0.1;
+  static FINE_RES = 0.01;
+
   constructor(app) {
     this._app = app;
     this.editor = null;
@@ -211,6 +218,16 @@ class EditorManager {
     this._lineageLines = null;
   }
 
+  /** Back out of every selection-ish highlight at once (ESC): lineage tint,
+   *  any pending cursor-line highlight, the 3D overlay, and the hot GUI
+   *  control. The cursor-line highlight re-arms on the next cursor move. */
+  clearShapeHighlights() {
+    clearTimeout(this._cursorLineTimer);
+    this.clearLineageHighlight();
+    this._app.gui.highlightControlsAtLine(-1);
+    if (this._app.viewport) { this._app.viewport.highlightShapesAtLine(-1); }
+  }
+
   /** Append a code snippet to the end of the document as a single undoable
    *  edit, reveal it, and focus the editor. Live evaluation picks up the
    *  change like any other edit. Used by SketchMode to commit sketches and
@@ -260,11 +277,14 @@ class EditorManager {
    *  being rebuilt. Calls made while an evaluation is in flight coalesce into one
    *  trailing evaluation that fires on completion, so the model always settles on
    *  the latest GUI state.
+   *  Mesh resolution is automatic: `draft` (mid-slider-drag) meshes coarse for
+   *  responsiveness; everything else meshes at REST_RES, then a debounced
+   *  background pass re-meshes the same shapes at FINE_RES once things go quiet.
    *  Returns a promise that resolves once this request's evaluation (immediate or
    *  queued) has fully completed, including meshing and rendering. */
-  evaluateCode(saveToURL = false, { keepGUI = false } = {}) {
+  evaluateCode(saveToURL = false, { keepGUI = false, draft = false } = {}) {
     return new Promise((resolve) => {
-      this._requestEval(saveToURL, keepGUI, resolve);
+      this._requestEval(saveToURL, keepGUI, resolve, draft);
     });
   }
 
@@ -273,21 +293,24 @@ class EditorManager {
     return this._evalInFlight || !!this._queuedEval;
   }
 
-  _requestEval(saveToURL, keepGUI, resolve) {
+  _requestEval(saveToURL, keepGUI, resolve, draft = false) {
     if (this._evalInFlight || window.workerWorking) {
       // Coalesce: any queued full rebuild outranks a live (keepGUI) update,
-      // and a queued save-to-URL request is preserved
+      // a queued save-to-URL request is preserved, and any non-draft
+      // requester upgrades the queued eval to full resolution
       if (!this._queuedEval) {
-        this._queuedEval = { keepGUI: true, saveToURL: false, resolvers: [] };
+        this._queuedEval = { keepGUI: true, saveToURL: false, draft: true, resolvers: [] };
       }
       this._queuedEval.keepGUI = this._queuedEval.keepGUI && keepGUI;
       this._queuedEval.saveToURL = this._queuedEval.saveToURL || saveToURL;
+      this._queuedEval.draft = this._queuedEval.draft && draft;
       this._queuedEval.resolvers.push(resolve);
       return;
     }
     if (!this._app.engine || !this._app.engine.isReady) { resolve(); return; }
     window.workerWorking = true;
     this._evalInFlight = true;
+    clearTimeout(this._refineTimer);  // a new eval supersedes any pending refine
 
     monaco.languages.typescript.typescriptDefaults.setExtraLibs(this._extraLibs);
     let newCode = this.editor.getValue();
@@ -318,12 +341,15 @@ class EditorManager {
     }
 
     // Use CascadeEngine to evaluate and get mesh data
+    const evalStart = performance.now();
     this._app.engine.evaluate(codeToEval, {
       guiState: this._app.gui.state,
+      maxDeviation: draft ? EditorManager.DRAFT_RES : EditorManager.REST_RES,
       sceneOptions: this._app.viewport ? this._app.viewport.getSceneOptions() : undefined,
     }).then((result) => {
       if (this._app.viewport && result.meshData) {
         this._app.viewport.renderMeshData(result.meshData, result.sceneOptions, result.shapeRanges);
+        if (!draft) { this._scheduleRefine(performance.now() - evalStart); }
       }
     }).catch((err) => {
       console.error("Evaluation error: " + err.message);
@@ -339,7 +365,7 @@ class EditorManager {
         setTimeout(() => {
           this._queuedEval = null;
           const done = () => { queued.resolvers.forEach(r => r()); };
-          this._requestEval(queued.saveToURL, queued.keepGUI, done);
+          this._requestEval(queued.saveToURL, queued.keepGUI, done, queued.draft);
         }, 0);
       }
     });
@@ -359,6 +385,30 @@ class EditorManager {
     }
 
     console.log("Generating Model");
+  }
+
+  /** After a normal-resolution render, quietly re-mesh the same shapes at
+   *  FINE_RES once nothing else has happened for a beat. Skipped for heavy
+   *  models (slow rest eval) — the worker is single-threaded, so a long
+   *  refine would stall the next interaction behind it. The refine result
+   *  is discarded if a new evaluation starts while it's in flight (the
+   *  worker serializes messages, so the new eval's mesh always lands last
+   *  anyway — this just avoids a stale flash). */
+  _scheduleRefine(restEvalMs) {
+    if (restEvalMs > 5000) { return; }
+    clearTimeout(this._refineTimer);
+    this._refineTimer = setTimeout(() => {
+      if (this._evalInFlight || this._queuedEval || window.workerWorking) { return; }
+      this._app.engine.remesh(
+        EditorManager.FINE_RES,
+        this._app.viewport ? this._app.viewport.getSceneOptions() : undefined
+      ).then((result) => {
+        if (this._evalInFlight || this._queuedEval) { return; } // superseded
+        if (this._app.viewport && result.meshData) {
+          this._app.viewport.renderMeshData(result.meshData, result.sceneOptions, result.shapeRanges);
+        }
+      }).catch(() => { /* worker busy or timeout — the rest-res mesh stands */ });
+    }, 1000);
   }
 
   /** Set editor mode: 'cascadestudio' or 'openscad'. */

@@ -162,6 +162,9 @@ class CascadeStudioWorker {
   /** Evaluate user CAD code (the contents of the Editor Window) and set the GUI State. */
   evaluate(payload) {
     self.opNumber = 0;
+    // Each evaluation owns the scene from scratch. (Meshing no longer clears
+    // sceneShapes — it must stay re-meshable for background refinement.)
+    self.sceneShapes = [];
     self.GUIState = payload.GUIState || {};
     // Caching is always on unless the caller explicitly disables it
     if (!("Cache?" in self.GUIState)) { self.GUIState["Cache?"] = true; }
@@ -260,7 +263,8 @@ class CascadeStudioWorker {
       postMessage({ "type": "Progress", "payload": { "opNumber": self.opNumber++, "opType": "Triangulating Faces" } });
       let facesAndEdges = self.ShapeToMesh(self.currentShape,
         payload.maxDeviation || 0.1, fullShapeEdgeHashes, fullShapeFaceHashes);
-      self.sceneShapes = [];
+      // sceneShapes intentionally NOT cleared: the background refine pass
+      // re-meshes the same shapes at finer resolution. evaluate() resets it.
       postMessage({ "type": "Progress", "payload": { "opNumber": self.opNumber, "opType": "" } });
       return [facesAndEdges, payload.sceneOptions, shapeRanges];
     } else {

@@ -312,6 +312,15 @@ class SketchMode {
     const env = this._env;
     if (env) {
       this._exitOrtho();
+      // Restore turntable orbiting: the flatten tween tilted camera.up to
+      // the sketch plane's Y (and a fast cancel can leave it half-lerped).
+      // OrbitControls rolls the view to honor camera.up, so a non-world up
+      // left behind makes every later orbit feel stuck to the sketch view.
+      // For straight-down sketches controls.update() lands the pole at the
+      // canonical top orientation, which matches the XY sketch framing.
+      env.camera.up.set(0, 1, 0);
+      env.camera.lookAt(env.controls.target);
+      env.controls.update();
       env.controls.enableRotate = this._savedRotate;
       env.renderer.domElement.style.cursor = '';
       for (const g of [this._staticGroup, this._entityGroup, this._previewGroup]) {

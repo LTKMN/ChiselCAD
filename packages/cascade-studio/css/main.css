@@ -899,7 +899,13 @@ body {
   color: var(--cs-accent);
 }
 .sketch-save-btn {
-  color: var(--cs-accent);
+  background: var(--cs-accent-dim);
+  border-color: var(--cs-accent);
+  color: #fff;
+  font-weight: 600;
+}
+.sketch-save-btn:hover {
+  background: var(--cs-accent);
 }
 .sketch-ribbon-sep {
   width: 1px;
