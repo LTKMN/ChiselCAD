@@ -198,6 +198,12 @@ npm run build
 npx playwright test    # 12 tests, ~25s
 ```
 
+There is also primitive support for LLMs in the loop natively. In the top menu there's API access for either Anthropic or Openrouter (all API keys and data are local to your browser, Chisel has no central server or any user data of any kind) and then a chat interface in the bottom left bar. This is extremely beta, but I'd love to hear what did / didn't work for you, and eventually which models seem to be adequate. I've been using Fable so far but that's probably overkill.
+
+You can also copy/paste into any LLM chat window, there's a prompt (quasi-skill) in that menu to get started with. Testing so far as been encouragingly successful.
+
+
+
 ## Credits
 
 ChiselCAD is a fork of **[CascadeStudio](https://github.com/zalo/CascadeStudio)** by [Johnathon Selstad (@zalo)](https://github.com/zalo) — all of the kernel, standard library, editor and engine groundwork is his, and remains under his MIT license
@@ -214,6 +220,10 @@ Built on:
 - [potpack](https://github.com/mapbox/potpack) — texture atlas packing
 - [esbuild](https://github.com/evanw/esbuild) — bundler
 - [Playwright](https://playwright.dev/) — testing
+
+Dedication:
+
+For Alex
 
 ## License
 
