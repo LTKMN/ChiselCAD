@@ -668,6 +668,26 @@ function Extrude(face, direction, keepFace) {
   return curExtrusion;
 }
 
+/** Extrude a single flat face of an existing shape along its outward normal
+ *  into a new solid. `faceIndex` follows ForEachFace / Faces() enumeration
+ *  order — the GUI's Extrude face-pick emits it. The parent shape stays in
+ *  the scene: Union the result for a boss, Difference it for a cut.
+ *  Negative dist extrudes into the body. */
+function ExtrudeFace(shape, faceIndex, dist) {
+  if (!shape || shape.IsNull()) { console.error("ExtrudeFace: input shape is null!"); return null; }
+  if (typeof dist !== 'number' || dist === 0) { console.error("ExtrudeFace: dist must be a non-zero number"); return null; }
+  let prism = self.CacheOp(arguments, "ExtrudeFace", () => {
+    let target = null;
+    ForEachFace(shape, (index, face) => { if (index === faceIndex) { target = face; } });
+    if (!target) {
+      throw new Error("face index " + faceIndex + " not found — the shape has fewer faces (did upstream geometry change?)");
+    }
+    return _extrudePrism(target, dist);
+  });
+  self.sceneShapes.push(prism);
+  return prism;
+}
+
 function RemoveInternalEdges(shape, keepShape) {
   let cleanShape = self.CacheOp(arguments, "RemoveInternalEdges", () => {
     let fusor = new self.oc.ShapeUpgrade_UnifySameDomain_2(shape, true, true, false);
@@ -875,6 +895,51 @@ function Pipe(shape, wirePath, keepInputs) {
   return curPipe;
 }
 
+// --- Construction Planes ---
+
+/** Create a construction plane: a plain `{ origin, normal, xDir }` object
+ *  accepted as the plane argument of `new Sketch(...)` (or as the base of
+ *  another `Plane(...)`). `base` is `'XY'`/`'XZ'`/`'YZ'` or any plane-like
+ *  object; `offset` slides the result along its normal. Cardinal frames match
+ *  the viewport's ghost planes, so positive offsets move toward the default
+ *  camera. Each call is registered in `self.scenePlanes` so the studio can
+ *  offer it as a sketch-plane pick target. */
+function Plane(base, offset) {
+  offset = (typeof offset === 'number') ? offset : 0;
+  const CARDINAL_FRAMES = {
+    XY: { origin: [0, 0, 0], normal: [0, 0, 1],  xDir: [1, 0, 0] },
+    XZ: { origin: [0, 0, 0], normal: [0, -1, 0], xDir: [1, 0, 0] },
+    YZ: { origin: [0, 0, 0], normal: [1, 0, 0],  xDir: [0, 1, 0] },
+  };
+  let b = base;
+  if (typeof base === 'string') { b = CARDINAL_FRAMES[base.toUpperCase()]; }
+  if (!b || !b.normal || _vecLength(b.normal) < 1e-10) {
+    console.error("Plane: base must be 'XY'/'XZ'/'YZ' or { origin, normal, xDir? } with a non-zero normal");
+    return null;
+  }
+  let O = b.origin || [0, 0, 0];
+  let N = _normalize(b.normal);
+  // Same frame derivation as Sketch: orthogonalize xDir against the normal,
+  // or synthesize a stable in-plane direction if absent
+  let X = b.xDir ? b.xDir.slice()
+    : (Math.abs(N[2]) < 0.99 ? [-N[1], N[0], 0] : [1, 0, 0]);
+  let dxn = _dot(X, N);
+  X = _normalize([X[0] - dxn * N[0], X[1] - dxn * N[1], X[2] - dxn * N[2]]);
+  let plane = {
+    origin: [O[0] + offset * N[0], O[1] + offset * N[1], O[2] + offset * N[2]],
+    normal: N,
+    xDir: X,
+  };
+  self.scenePlanes.push({
+    origin: plane.origin, normal: N, xDir: X,
+    // Base frame + offset let the viewport visualize how the plane was
+    // derived while its defining line is being edited
+    baseOrigin: [O[0], O[1], O[2]], offset,
+    lineNumber: self.getCallingLocation()[0],
+  });
+  return plane;
+}
+
 // --- Sketch Class (drawing utility) ---
 
 function Sketch(startingPoint, plane) {
@@ -883,6 +948,21 @@ function Sketch(startingPoint, plane) {
   this.wires        = [];
   this.fillets      = [];
   this.argsString   = self.ComputeHash(arguments, true);
+  // The `new Sketch(...)` line — chains often span lines, and provenance
+  // (click-to-pick, history) should resolve to the `let` line, not `.Face()`
+  this._sourceLine  = self.getCallingLocation()[0];
+
+  // Bare sketches aren't CacheOps, so without this they'd be invisible to
+  // the modeling history — and unpickable in the viewport until some other
+  // op runs. Record a step directly when the sketch finalizes. The caller
+  // must flushHistoryStep() BEFORE pushing the shape so no earlier op's
+  // snapshot contains it (provenance finds the first step with the hash).
+  this._recordHistoryStep = function () {
+    self.modelHistory.push({
+      fnName: 'Sketch', lineNumber: this._sourceLine,
+      shapes: [...self.sceneShapes], shapeCount: self.sceneShapes.length,
+    });
+  };
 
   // Plane support: cardinal 'XY' (default) / 'XZ' / 'YZ', or a baked arbitrary
   // plane object { origin, normal, xDir } (from sketch-on-face). The cardinal
@@ -979,9 +1059,11 @@ function Sketch(startingPoint, plane) {
     this.argsString += self.ComputeHash(arguments, true);
     this.applyFillets();
     this.faces[this.faces.length - 1].hash = self.stringToHash(this.argsString);
+    self.flushHistoryStep();  // close the previous op's snapshot before the wire exists
     let wire = GetWire(this.faces[this.faces.length - 1]);
     if (reversed) { wire = wire.Reversed(); }
     self.sceneShapes.push(wire);
+    this._recordHistoryStep();
     return wire;
   }
   this.Face = function (reversed) {
@@ -990,7 +1072,9 @@ function Sketch(startingPoint, plane) {
     let face = this.faces[this.faces.length - 1];
     if (reversed) { face = face.Reversed(); }
     face.hash = self.stringToHash(this.argsString);
+    self.flushHistoryStep();  // close the previous op's snapshot before the face exists
     self.sceneShapes.push(face);
+    this._recordHistoryStep();
     return face;
   }
 
@@ -1232,7 +1316,12 @@ function _faceNormal(face) {
   let normal = du.Crossed(dv);
   let mag = normal.Magnitude();
   if (mag < 1e-10) return [0, 0, 1];
-  return [normal.X() / mag, normal.Y() / mag, normal.Z() / mag];
+  // A REVERSED face flips the geometric normal: faces enumerated from a
+  // solid carry orientation, so honoring it yields the OUTWARD normal
+  // (sketch-built faces are FORWARD — their behavior is unchanged).
+  const flip = (face.Orientation_1 &&
+    face.Orientation_1() === self.oc.TopAbs_Orientation.TopAbs_REVERSED) ? -1 : 1;
+  return [flip * normal.X() / mag, flip * normal.Y() / mag, flip * normal.Z() / mag];
 }
 
 function _dot(a, b) {
@@ -1685,6 +1774,7 @@ class CascadeStudioStandardLibrary {
     self.Difference = Difference;
     self.Intersection = Intersection;
     self.Extrude = Extrude;
+    self.ExtrudeFace = ExtrudeFace;
     self.RemoveInternalEdges = RemoveInternalEdges;
     self.Offset = Offset;
     self.OffsetWire = OffsetWire;
@@ -1692,6 +1782,7 @@ class CascadeStudioStandardLibrary {
     self.RotatedExtrude = RotatedExtrude;
     self.Loft = Loft;
     self.Pipe = Pipe;
+    self.Plane = Plane;
     self.Sketch = Sketch;
     self.SaveFile = SaveFile;
     self.Slider = Slider;

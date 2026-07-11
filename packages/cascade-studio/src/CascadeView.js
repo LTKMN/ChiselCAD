@@ -7,6 +7,7 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js';
 import { HandleManager } from './CascadeViewHandles.js';
 import { VIEWPORT_DEFAULTS } from './ThemeManager.js';
+import { getPlaneColor, getAccentColor } from './SketchMode.js';
 
 const DEFAULT_MATCAP = 'ceramic_lightbulb.png';
 
@@ -124,6 +125,9 @@ class CascadeEnvironment {
     this._shakeMag       = 0;
     // Shake armed to fire when the next model render lands
     this._pendingShake   = 0;
+    // Signature of the last rendered shapes — armed shakes only fire when
+    // the geometry actually changed (plane/comment edits stay silent)
+    this._lastMeshSig    = null;
 
     // Viewport display settings (app-level, not per-model) — persisted
     // locally. Loaded before the matcap so the choice applies from frame one.
@@ -174,6 +178,16 @@ class CascadeEnvironment {
     this._highlightedLine = null;
     // Click → code state: per-scene-shape {hash, faceCount} in mesh order
     this._shapeRanges = [];
+    // Feature-pick affordances: hover glow + persistent picked-shape glows
+    this._pickHighlights = new Map();  // lineNumber → THREE.Group (null while meshing)
+    this._pickHoverObject = null;
+    this._pickHoverLine = -1;
+    // Construction planes from the last evaluation: [{origin, normal, xDir,
+    // baseOrigin, offset, lineNumber}] in OCC coords — sketch mode offers
+    // these as pick targets; the cursor-line preview draws base + result
+    this.scenePlanes = [];
+    this._planePreviewObject = null;
+    this._planePreviewLine = -1;
 
     // Fit camera on first render so the orbit target centers on the model
     this._isFirstRender = true;
@@ -296,9 +310,17 @@ class CascadeEnvironment {
 
     // New evaluation: stale provenance and line highlights are invalid
     this._shapeRanges = shapeRanges || [];
+    // Did the geometry actually change, or is this a re-mesh / no-op eval of
+    // the same shapes? (hashes are content-derived). Gates the commit shake
+    // and pick-highlight invalidation — a background refine or a plane edit
+    // must not wipe an in-progress feature pick or kick the camera.
+    const meshSig = this._shapeRanges.map(r => r.hash + ':' + r.faceCount).join('|');
+    const geomChanged = meshSig !== this._lastMeshSig;
+    this._lastMeshSig = meshSig;
     this._lineHighlightCache = {};
     this._highlightedLine = null;
     this._clearLineHighlight();
+    if (geomChanged) { this.clearPickHighlights(); }
 
     // The old mainObject is dead! Long live the mainObject!
     this.environment.scene.remove(this.mainObject);
@@ -326,9 +348,11 @@ class CascadeEnvironment {
       this.fitCamera();
     }
     // An armed commit-shake fires now, on the same frame the new model
-    // appears — kicking at commit time would land before the redraw
+    // appears — kicking at commit time would land before the redraw. Only
+    // when the geometry actually changed: construction planes are ghosts,
+    // not objects, so adding or editing one shouldn't thunk.
     if (this._pendingShake) {
-      this.shake(this._pendingShake);
+      if (geomChanged) { this.shake(this._pendingShake); }
       this._pendingShake = 0;
     }
     this.environment.viewDirty = true;
@@ -648,25 +672,30 @@ class CascadeEnvironment {
     const hasOp = this._historySteps.some(s => s.lineNumber === lineNumber);
     if (!hasOp) { this._clearLineHighlight(); return; }
 
-    const cached = this._lineHighlightCache[lineNumber];
-    if (cached !== undefined) { this._showLineHighlight(cached); return; }
-
-    // Don't queue highlight meshing behind an active evaluation — the cursor
-    // will re-trigger once things settle
-    if (window.workerWorking) { return; }
-
-    this._app.engine.meshShapesAtLine(lineNumber).then((meshData) => {
-      this._lineHighlightCache[lineNumber] = meshData || null;
+    this._lineMeshFor(lineNumber).then((meshData) => {
       if (this._highlightedLine === lineNumber) { this._showLineHighlight(meshData); }
-    }).catch(() => { /* worker busy or line vanished — next cursor move retries */ });
+    });
   }
 
-  /** Replace the current line-highlight overlay with one built from meshData. */
-  _showLineHighlight(meshData) {
-    this._clearLineHighlight();
-    if (!meshData) { return; }
+  /** Mesh data for the shapes created on a source line, via the per-eval
+   *  cache. Resolves null when unavailable (worker busy, line vanished). */
+  _lineMeshFor(lineNumber) {
+    const cached = this._lineHighlightCache[lineNumber];
+    if (cached !== undefined) { return Promise.resolve(cached); }
+    // Don't queue highlight meshing behind an active evaluation — the
+    // caller re-triggers once things settle
+    if (window.workerWorking) { return Promise.resolve(null); }
+    return this._app.engine.meshShapesAtLine(lineNumber).then((meshData) => {
+      this._lineHighlightCache[lineNumber] = meshData || null;
+      return meshData || null;
+    }).catch(() => null);
+  }
+
+  /** Build a translucent glow overlay group from line mesh data, or null. */
+  _buildHighlightMesh(meshData, opacity) {
+    if (!meshData) { return null; }
     const [facelist] = meshData;
-    if (!facelist || facelist.length === 0) { return; }
+    if (!facelist || facelist.length === 0) { return null; }
 
     const vertices = [], triangles = [];
     let vInd = 0;
@@ -686,7 +715,10 @@ class CascadeEnvironment {
     geometry.setIndex(triangles);
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
     const material = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(this._vtheme.glow), transparent: true, opacity: 0.35,
+      color: new THREE.Color(this._vtheme.glow), transparent: true, opacity,
+      // DoubleSide: sketch ghosts render (and raycast) from both sides, so
+      // their glow must too — front-only made back-side hovers look dead
+      side: THREE.DoubleSide,
       depthWrite: false, polygonOffset: true,
       polygonOffsetFactor: -4.0, polygonOffsetUnits: -4.0,
     });
@@ -696,7 +728,23 @@ class CascadeEnvironment {
     const group = new THREE.Group();
     group.rotation.x = -Math.PI / 2;  // same OCC Z-up → Three Y-up mapping as the model
     group.add(mesh);
+    return group;
+  }
 
+  /** Remove an overlay group from the scene and free its GPU resources. */
+  _disposeOverlay(group) {
+    this.environment.scene.remove(group);
+    group.traverse((o) => {
+      if (o.geometry) { o.geometry.dispose(); }
+      if (o.material) { o.material.dispose(); }
+    });
+  }
+
+  /** Replace the current line-highlight overlay with one built from meshData. */
+  _showLineHighlight(meshData) {
+    this._clearLineHighlight();
+    const group = this._buildHighlightMesh(meshData, 0.35);
+    if (!group) { return; }
     this._lineHighlightObject = group;
     this.environment.scene.add(group);
     this.environment.viewDirty = true;
@@ -705,13 +753,216 @@ class CascadeEnvironment {
   /** Remove the line-highlight overlay, if any. */
   _clearLineHighlight() {
     if (!this._lineHighlightObject) { return; }
-    this.environment.scene.remove(this._lineHighlightObject);
-    this._lineHighlightObject.traverse((o) => {
-      if (o.geometry) { o.geometry.dispose(); }
-      if (o.material) { o.material.dispose(); }
-    });
+    this._disposeOverlay(this._lineHighlightObject);
     this._lineHighlightObject = null;
     this.environment.viewDirty = true;
+  }
+
+  // =====================================================================
+  //  Pick highlights — feature pick mode (Loft/Union/Cut/...) affordances:
+  //  a weak glow follows the hovered shape, and picked shapes keep a
+  //  strong glow until the pick completes or cancels
+  // =====================================================================
+
+  /** Glow the shape defined on this line as a hover candidate (weak).
+   *  Pass -1 (or a selected line) to remove the hover glow. */
+  setPickHover(lineNumber) {
+    if (lineNumber === this._pickHoverLine) {
+      // Same target: retry only if the earlier attempt produced nothing
+      // (the worker was busy mid-eval and _lineMeshFor declined to queue) —
+      // otherwise a glowless first hover would stay glowless until the
+      // cursor left the shape and came back
+      if (lineNumber < 1 || this._pickHoverObject || this._pickHoverPending ||
+          this._pickHighlights.has(lineNumber)) { return; }
+    } else {
+      this._pickHoverLine = lineNumber;
+      this._removePickHover();
+      if (lineNumber < 1 || this._pickHighlights.has(lineNumber)) { return; }
+    }
+    this._pickHoverPending = true;
+    this._lineMeshFor(lineNumber).then((meshData) => {
+      this._pickHoverPending = false;
+      // Stale if the cursor moved on or the shape got picked meanwhile
+      if (this._pickHoverLine !== lineNumber || this._pickHighlights.has(lineNumber)) { return; }
+      const group = this._buildHighlightMesh(meshData, 0.2);
+      if (!group) { return; }
+      this._removePickHover(); // never stack two hover overlays
+      this._pickHoverObject = group;
+      this.environment.scene.add(group);
+      this.environment.viewDirty = true;
+    });
+  }
+
+  /** Keep the shape defined on this line glowing until clearPickHighlights. */
+  addPickHighlight(lineNumber, _isRetry) {
+    if (lineNumber < 1 || this._pickHighlights.has(lineNumber)) { return; }
+    this._pickHighlights.set(lineNumber, null); // reserve while meshing
+    if (this._pickHoverLine === lineNumber) { this._removePickHover(); } // promote
+    this._lineMeshFor(lineNumber).then((meshData) => {
+      if (!this._pickHighlights.has(lineNumber)) { return; } // cleared meanwhile
+      if (!meshData) {
+        // Worker was busy — retry once when it has likely settled. The
+        // reservation check keeps a retry from resurrecting a cleared pick.
+        if (!_isRetry) {
+          setTimeout(() => {
+            if (this._pickHighlights.get(lineNumber) === null && this._pickHighlights.has(lineNumber)) {
+              this._pickHighlights.delete(lineNumber);
+              this.addPickHighlight(lineNumber, true);
+            }
+          }, 500);
+        } else {
+          this._pickHighlights.delete(lineNumber);
+        }
+        return;
+      }
+      const group = this._buildHighlightMesh(meshData, 0.45);
+      if (!group) { return; }
+      this._pickHighlights.set(lineNumber, group);
+      this.environment.scene.add(group);
+      this.environment.viewDirty = true;
+    });
+  }
+
+  /** Drop the hover glow and every picked-shape glow. */
+  clearPickHighlights() {
+    this._removePickHover();
+    this._pickHoverLine = -1;
+    for (const group of this._pickHighlights.values()) {
+      if (group) { this._disposeOverlay(group); }
+    }
+    this._pickHighlights.clear();
+    this.environment.viewDirty = true;
+  }
+
+  _removePickHover() {
+    if (!this._pickHoverObject) { return; }
+    this._disposeOverlay(this._pickHoverObject);
+    this._pickHoverObject = null;
+    this.environment.viewDirty = true;
+  }
+
+  // =====================================================================
+  //  Construction-plane preview — while the cursor sits on a `Plane(...)`
+  //  line, show the base plane (faint, dashed) and the offset result so
+  //  editing the offset literal has immediate visual feedback
+  // =====================================================================
+
+  /** Preview the construction plane(s) defined on a source line. Pass a
+   *  line with no planes (or -1) to clear. */
+  previewPlanesAtLine(lineNumber, force) {
+    if (!force && lineNumber === this._planePreviewLine) { return; }
+    this._planePreviewLine = lineNumber;
+    this._clearPlanePreview();
+    const planes = (this.scenePlanes || []).filter(p => p.lineNumber === lineNumber);
+    if (planes.length === 0) { return; }
+
+    // Size the quads to read against the model: a bit larger than its
+    // longest dimension, clamped so tiny/huge models stay legible
+    let S = 60;
+    if (this.boundingBox) {
+      const bs = new THREE.Vector3();
+      this.boundingBox.getSize(bs);
+      const r = Math.max(bs.x, bs.y, bs.z) * 0.7;
+      if (isFinite(r) && r > 1) { S = Math.min(200, Math.max(30, r)); }
+    }
+    const planeColor = new THREE.Color(getPlaneColor());
+    // Base plane wears the pick-ghost accent so it reads as "what you
+    // originally selected to offset from"
+    const baseColor = new THREE.Color(getAccentColor());
+    const group = new THREE.Group();
+    group.rotation.x = -Math.PI / 2; // OCC Z-up → Three Y-up, same as the model
+
+    const v3 = (a) => new THREE.Vector3(a[0], a[1], a[2]);
+    const quad = (O, X, Y, color, fillOpacity, edgeOpacity, dashed) => {
+      const c = [[-S, -S], [S, -S], [S, S], [-S, S]].map(([a, b]) =>
+        new THREE.Vector3(
+          O[0] + a * X[0] + b * Y[0],
+          O[1] + a * X[1] + b * Y[1],
+          O[2] + a * X[2] + b * Y[2]));
+      const fill = new THREE.Mesh(
+        new THREE.BufferGeometry().setFromPoints([c[0], c[1], c[2], c[0], c[2], c[3]]),
+        new THREE.MeshBasicMaterial({
+          color, transparent: true, opacity: fillOpacity,
+          side: THREE.DoubleSide, depthWrite: false,
+        }));
+      const edge = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([...c, c[0]]),
+        dashed
+          ? new THREE.LineDashedMaterial({ color, transparent: true, opacity: edgeOpacity, dashSize: 4, gapSize: 4 })
+          : new THREE.LineBasicMaterial({ color, transparent: true, opacity: edgeOpacity }));
+      if (dashed) { edge.computeLineDistances(); }
+      group.add(fill, edge);
+    };
+
+    for (const p of planes) {
+      const N = p.normal, X = p.xDir;
+      const Y = [N[1] * X[2] - N[2] * X[1], N[2] * X[0] - N[0] * X[2], N[0] * X[1] - N[1] * X[0]]; // N × X
+      quad(p.origin, X, Y, planeColor, 0.08, 0.9);
+      if (p.baseOrigin && Math.abs(p.offset || 0) > 1e-9) {
+        // The base it was offset from: hover-ghost strength, dashed edge
+        quad(p.baseOrigin, X, Y, baseColor, 0.1, 0.85, true);
+        // Offset connector along the normal, distance called out at the middle
+        const a = v3(p.baseOrigin), b = v3(p.origin);
+        const link = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([a, b]),
+          new THREE.LineDashedMaterial({ color: planeColor, transparent: true, opacity: 0.9, dashSize: 2, gapSize: 2 }));
+        link.computeLineDistances();
+        group.add(link);
+        const label = this._planeTextSprite(String(parseFloat(p.offset.toFixed(4))), '#' + planeColor.getHexString());
+        label.position.copy(a.clone().lerp(b, 0.5));
+        group.add(label);
+      }
+    }
+
+    this._planePreviewObject = group;
+    this.environment.scene.add(group);
+    this.environment.viewDirty = true;
+  }
+
+  /** Rebuild the active plane preview against fresh scenePlanes (post-eval),
+   *  so editing the offset literal moves the previewed plane live. */
+  refreshPlanePreview() {
+    if (this._planePreviewLine >= 0) { this.previewPlanesAtLine(this._planePreviewLine, true); }
+  }
+
+  _clearPlanePreview() {
+    if (!this._planePreviewObject) { return; }
+    this.environment.scene.remove(this._planePreviewObject);
+    this._planePreviewObject.traverse((o) => {
+      if (o.geometry) { o.geometry.dispose(); }
+      if (o.material) {
+        if (o.material.map) { o.material.map.dispose(); }
+        o.material.dispose();
+      }
+    });
+    this._planePreviewObject = null;
+    this.environment.viewDirty = true;
+  }
+
+  /** Small canvas-text sprite for the offset callout (uncached — lives and
+   *  dies with the preview group). */
+  _planeTextSprite(text, cssColor) {
+    const canvas = document.createElement('canvas');
+    let ctx = canvas.getContext('2d');
+    const font = '26px "Segoe UI", system-ui, sans-serif';
+    ctx.font = font;
+    canvas.width = Math.ceil(ctx.measureText(text).width) + 14;
+    canvas.height = 36;
+    ctx = canvas.getContext('2d'); // resize resets state
+    ctx.font = font;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(17, 17, 17, 0.65)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = cssColor;
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 1);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+    const h = 8;
+    spr.scale.set(h * canvas.width / canvas.height, h, 1);
+    spr.renderOrder = 999;
+    return spr;
   }
 
   /** Raycast a mouse event against the model → the clicked scene shape's
@@ -748,7 +999,12 @@ class CascadeEnvironment {
     const hash = this._shapeHashAtMouse(event);
     if (hash === null || hash === undefined) { return null; }
     const step = this._historySteps.find(s => (s.hashes || []).includes(hash));
-    return { hash, definingLine: (step && step.lineNumber >= 1) ? step.lineNumber : -1 };
+    const range = this._shapeRanges.find(r => r.hash === hash);
+    return {
+      hash,
+      sketch: !!(range && range.sketch),  // a bare 2D profile (ghost), not a solid
+      definingLine: (step && step.lineNumber >= 1) ? step.lineNumber : -1,
+    };
   }
 
   /** Pick a flat model face under the mouse for sketch-on-face. Returns the
@@ -821,7 +1077,18 @@ class CascadeEnvironment {
       }
     }
 
-    return { origin, normal, distance: hit.distance, worldTris };
+    // Local (per-shape) face index — matches ForEachFace / Faces() selector
+    // enumeration in the worker, so ExtrudeFace(shape, index, d) targets it.
+    // Packed into color.x alongside the global index in color.y.
+    const localFaceIndex = col.getX(hit.face.a);
+    // Owning shape via cumulative face ranges (same walk as _shapeHashAtMouse)
+    let shapeHash = null, cumulative = 0;
+    for (const range of this._shapeRanges) {
+      cumulative += range.faceCount;
+      if (gfi < cumulative) { shapeHash = range.hash; break; }
+    }
+
+    return { origin, normal, distance: hit.distance, worldTris, localFaceIndex, shapeHash };
   }
 
   /** Raycast a click against the model; jump the editor to the line whose op

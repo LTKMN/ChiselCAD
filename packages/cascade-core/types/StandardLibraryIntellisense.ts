@@ -14,6 +14,13 @@ type integer = number;
 // Sketch API
 // ============================================================
 
+/** Create a construction plane: a `{ origin, normal, xDir }` object usable as
+ * the plane argument of `new Sketch(...)` or as the base of another `Plane(...)`.
+ * @param base - `'XY'`, `'XZ'`, `'YZ'`, or any `{ origin?, normal, xDir? }` plane object
+ * @param offset - Distance to slide the plane along its normal (default 0)
+ * @example```let plane1 = Plane('XY', 10); let s = new Sketch([0,0], plane1).Circle([0,0], 8).Face();```*/
+declare function Plane(base: 'XY' | 'XZ' | 'YZ' | { origin?: number[], normal: number[], xDir?: number[] }, offset?: number): { origin: number[], normal: number[], xDir: number[] };
+
 /** Starts sketching a 2D shape which can contain lines, arcs, bezier splines, and fillets.
  * @param startingPoint - Starting point as [x, y] in the chosen plane
  * @param plane - Drawing plane: 'XY' (default), 'XZ', or 'YZ'; or a baked
@@ -156,6 +163,14 @@ function RemoveInternalEdges(shape: oc.TopoDS_Shape, keepShape?: boolean) : oc.T
  * each region gets its own prism and the result is a single compound solid.
  * @example```let grid = Extrude([sketchA, sketchB, sketchC], 10);  // one feature, three islands```*/
 function Extrude(face: oc.TopoDS_Shape | oc.TopoDS_Shape[], direction: number[] | number, keepFace?: boolean) : oc.TopoDS_Shape;
+
+/** Extrudes a single flat face of an existing shape along its outward normal
+ * into a new standalone solid — Union it for a boss, Difference it for a cut.
+ * `faceIndex` follows ForEachFace / Faces() enumeration order (the GUI's
+ * Extrude face-pick emits it). The parent shape stays in the scene.
+ * Negative dist extrudes into the body.
+ * @example```let boss = ExtrudeFace(solid1, 4, 15); let solid2 = Union([solid1, boss]);```*/
+function ExtrudeFace(shape: oc.TopoDS_Shape, faceIndex: number, dist: number) : oc.TopoDS_Shape;
 
 /** Extrudes and twists a flat wire upwards along the z-axis.
  * The original wire is removed unless `keepWire` is true.

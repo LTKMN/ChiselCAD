@@ -12,6 +12,7 @@ class CascadeStudioWorker {
     self.oc = null;
     self.externalShapes = {};
     self.sceneShapes = [];
+    self.scenePlanes = [];
     self.GUIState = {};
     self.fullShapeEdgeHashes = {};
     self.fullShapeFaceHashes = {};
@@ -165,6 +166,7 @@ class CascadeStudioWorker {
     // Each evaluation owns the scene from scratch. (Meshing no longer clears
     // sceneShapes — it must stay re-meshable for background refinement.)
     self.sceneShapes = [];
+    self.scenePlanes = [];
     self.GUIState = payload.GUIState || {};
     // Caching is always on unless the caller explicitly disables it
     if (!("Cache?" in self.GUIState)) { self.GUIState["Cache?"] = true; }
@@ -269,11 +271,14 @@ class CascadeStudioWorker {
       // sceneShapes intentionally NOT cleared: the background refine pass
       // re-meshes the same shapes at finer resolution. evaluate() resets it.
       postMessage({ "type": "Progress", "payload": { "opNumber": self.opNumber, "opType": "" } });
-      return [facesAndEdges, payload.sceneOptions, shapeRanges];
+      return [facesAndEdges, payload.sceneOptions, shapeRanges, self.scenePlanes || []];
     } else {
       console.error("There were no scene shapes returned!");
     }
     postMessage({ "type": "Progress", "payload": { "opNumber": self.opNumber, "opType": "" } });
+    // No mesh, but still a real response: construction planes (and an empty
+    // scene) must reach the main thread instead of stalling the request
+    return [null, payload.sceneOptions, [], self.scenePlanes || []];
   }
 
   /** Triangulate and return the shapes from a specific modeling history step.

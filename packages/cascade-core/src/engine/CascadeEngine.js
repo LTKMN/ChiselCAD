@@ -81,13 +81,14 @@ class CascadeEngine {
 
     this._working = false;
 
-    if (!result) return { meshData: null, sceneOptions: {}, shapeRanges: [] };
+    if (!result) return { meshData: null, sceneOptions: {}, shapeRanges: [], scenePlanes: [] };
 
-    const [[faces, edges], resultSceneOptions, shapeRanges] = result;
+    const [facesAndEdges, resultSceneOptions, shapeRanges, scenePlanes] = result;
     return {
-      meshData: { faces, edges },
+      meshData: facesAndEdges ? { faces: facesAndEdges[0], edges: facesAndEdges[1] } : null,
       sceneOptions: resultSceneOptions || {},
-      shapeRanges: shapeRanges || []
+      shapeRanges: shapeRanges || [],
+      scenePlanes: scenePlanes || []
     };
   }
 
@@ -101,13 +102,14 @@ class CascadeEngine {
       sceneOptions: sceneOptions || {}
     }, 120000);
 
-    if (!result) return { meshData: null, sceneOptions: {}, shapeRanges: [] };
+    if (!result) return { meshData: null, sceneOptions: {}, shapeRanges: [], scenePlanes: [] };
 
-    const [[faces, edges], resultSceneOptions, shapeRanges] = result;
+    const [facesAndEdges, resultSceneOptions, shapeRanges, scenePlanes] = result;
     return {
-      meshData: { faces, edges },
+      meshData: facesAndEdges ? { faces: facesAndEdges[0], edges: facesAndEdges[1] } : null,
       sceneOptions: resultSceneOptions || {},
-      shapeRanges: shapeRanges || []
+      shapeRanges: shapeRanges || [],
+      scenePlanes: scenePlanes || []
     };
   }
 

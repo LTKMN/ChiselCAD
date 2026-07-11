@@ -241,6 +241,22 @@ Difference(body, [Extrude(s, [0.5, -12])]);  // cut: starts 0.5 proud, cuts 12 d
 Union([body, Extrude(s, [-0.5, 20])]);       // boss: root buried 0.5, rises 20
 ```
 
+**Extruding a face of an existing solid**: `ExtrudeFace(shape, faceIndex, dist)` prisms
+one flat face along its outward normal into a standalone solid (Union for a boss,
+Difference for a pocket; negative dist goes into the body). `faceIndex` follows
+`Faces()`/ForEachFace enumeration — the GUI's Extrude face-pick emits it.
+
+**Named construction planes**: `Plane(base, offset)` returns a `{ origin, normal, xDir }`
+object — `base` is `'XY'`/`'XZ'`/`'YZ'`, another plane, or any plane-like object; `offset`
+slides along the normal. Sketches can reference the variable, so editing the offset moves
+every sketch on it. The GUI "Plane" button emits this form, and named planes appear as
+labeled pickable ghost quads when starting a sketch:
+
+```javascript
+let plane1 = Plane('XY', 10);                 // Z = 10 datum
+let s = new Sketch([0, 0], plane1).Circle([0, 0], 8).Face();
+```
+
 ### 13. Null Shape Cascading Errors
 
 If any operation produces a null shape (e.g., from bad Scale, failed Fillet, etc.),

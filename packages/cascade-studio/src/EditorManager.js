@@ -113,6 +113,7 @@ class EditorManager {
       })
     });
     window.monacoEditor = this.editor;
+    this._addFlipValuesAction();
 
     // Live evaluation: re-evaluate shortly after the user stops typing, so the
     // model, GUI panel, and console track the code without needing F5
@@ -143,7 +144,10 @@ class EditorManager {
       this._cursorLineTimer = setTimeout(() => {
         const line = (this.mode === 'cascadestudio') ? e.position.lineNumber : -1;
         this._app.gui.highlightControlsAtLine(line);
-        if (this._app.viewport) { this._app.viewport.highlightShapesAtLine(line); }
+        if (this._app.viewport) {
+          this._app.viewport.highlightShapesAtLine(line);
+          this._app.viewport.previewPlanesAtLine(line);
+        }
       }, 150);
     });
 
@@ -235,7 +239,145 @@ class EditorManager {
     clearTimeout(this._cursorLineTimer);
     this.clearLineageHighlight();
     this._app.gui.highlightControlsAtLine(-1);
-    if (this._app.viewport) { this._app.viewport.highlightShapesAtLine(-1); }
+    if (this._app.viewport) {
+      this._app.viewport.highlightShapesAtLine(-1);
+      this._app.viewport.previewPlanesAtLine(-1);
+    }
+  }
+
+  /** Right-click → "Flip Values": swap the two operands of the call or
+   *  array under the cursor. Difference(solid1, [solid2]) becomes
+   *  Difference(solid2, [solid1]) — the values trade places, the bracket
+   *  structure stays put — so reversing a cut/loft direction is one click. */
+  _addFlipValuesAction() {
+    this.editor.addAction({
+      id: 'chisel-flip-values',
+      label: 'Flip Values',
+      contextMenuGroupId: '1_modification',
+      contextMenuOrder: 3.5,
+      run: (ed) => {
+        const pos = ed.getPosition();
+        const model = ed.getModel();
+        if (!pos || !model) { return; }
+        const line = model.getLineContent(pos.lineNumber);
+        const flipped = EditorManager._flipInLine(line, pos.column - 1);
+        if (flipped === null) {
+          try {
+            ed.getContribution('editor.contrib.messageController')
+              .showMessage('Nothing to flip here — right-click a call or pair like Fn(a, [b])', pos);
+          } catch (e) { /* internal contribution moved — fail quietly */ }
+          return;
+        }
+        ed.executeEdits('chisel-flip', [{
+          range: new monaco.Range(pos.lineNumber, 1, pos.lineNumber, line.length + 1),
+          text: flipped,
+        }]);
+      },
+    });
+  }
+
+  /** Swap the two values of the bracket group around `col` (0-based) in
+   *  `line`, innermost group first, walking outward. Returns the new line,
+   *  or null if nothing swappable is there.
+   *  - `[a, b]` swaps its two elements (also reached via `Fn([a, b])`)
+   *  - `Fn(a, [b])` swaps the PAYLOADS a and b, leaving the array wrapper
+   *    in place; multi-element arrays (vectors, spans) are single values,
+   *    so `Fn(a, [x, y, z])` is not swappable at the call level */
+  static _flipInLine(line, col) {
+    const regions = EditorManager._bracketRegions(line);
+    const candidates = regions
+      .filter(r => col > r.open && col <= r.close)
+      .sort((a, b) => (a.close - a.open) - (b.close - b.open));
+    // Fallback: right-clicking anywhere on the line (the `let`, the call
+    // name) targets the line's outermost call
+    const outermost = regions.filter(r => r.char === '(')
+      .sort((a, b) => (b.close - b.open) - (a.close - a.open))[0];
+    if (outermost && !candidates.includes(outermost)) { candidates.push(outermost); }
+
+    for (const r of candidates) {
+      const elems = EditorManager._topLevelElements(line, r.open + 1, r.close);
+      if (r.char === '[' && elems.length === 2) {
+        return EditorManager._swapSpans(line, elems[0], elems[1]);
+      }
+      if (r.char !== '(') { continue; }
+      if (elems.length === 1) {
+        // Single argument that is itself a two-element array → flip inside
+        const [a, b] = elems[0];
+        if (line[a] === '[' && line[b - 1] === ']') {
+          const inner = EditorManager._topLevelElements(line, a + 1, b - 1);
+          if (inner.length === 2) { return EditorManager._swapSpans(line, inner[0], inner[1]); }
+        }
+        continue;
+      }
+      if (elems.length !== 2) { continue; }
+      const payloads = elems.map(([a, b]) => {
+        if (line[a] !== '[' || line[b - 1] !== ']') { return [a, b]; }
+        const inner = EditorManager._topLevelElements(line, a + 1, b - 1);
+        return inner.length === 1 ? inner[0] : null; // multi-element array: not a slot
+      });
+      if (payloads[0] && payloads[1]) {
+        return EditorManager._swapSpans(line, payloads[0], payloads[1]);
+      }
+    }
+    return null;
+  }
+
+  /** Balanced ()/[] regions on a line, string- and //-comment-aware.
+   *  0-based open/close indices, in close order (inner before outer). */
+  static _bracketRegions(line) {
+    const regions = [], stack = [];
+    let str = null;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (str) {
+        if (ch === '\\') { i++; }
+        else if (ch === str) { str = null; }
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === '`') { str = ch; continue; }
+      if (ch === '/' && line[i + 1] === '/') { break; }
+      if (ch === '(' || ch === '[') { stack.push({ char: ch, open: i }); continue; }
+      if (ch === ')' || ch === ']') {
+        const want = ch === ')' ? '(' : '[';
+        while (stack.length && stack[stack.length - 1].char !== want) { stack.pop(); }
+        const top = stack.pop();
+        if (top) { regions.push({ char: top.char, open: top.open, close: i }); }
+      }
+    }
+    return regions;
+  }
+
+  /** Top-level comma-separated element spans within line[start, end),
+   *  whitespace-trimmed; nested brackets and strings don't split. */
+  static _topLevelElements(line, start, end) {
+    const elems = [];
+    let depth = 0, str = null, s = start;
+    for (let i = start; i < end; i++) {
+      const ch = line[i];
+      if (str) {
+        if (ch === '\\') { i++; }
+        else if (ch === str) { str = null; }
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === '`') { str = ch; continue; }
+      if (ch === '(' || ch === '[' || ch === '{') { depth++; continue; }
+      if (ch === ')' || ch === ']' || ch === '}') { depth--; continue; }
+      if (ch === ',' && depth === 0) { elems.push([s, i]); s = i + 1; }
+    }
+    elems.push([s, end]);
+    return elems
+      .map(([a, b]) => {
+        while (a < b && /\s/.test(line[a])) { a++; }
+        while (b > a && /\s/.test(line[b - 1])) { b--; }
+        return [a, b];
+      })
+      .filter(([a, b]) => b > a);
+  }
+
+  static _swapSpans(line, [aS, aE], [bS, bE]) {
+    if (aS > bS) { [aS, aE, bS, bE] = [bS, bE, aS, aE]; }
+    const a = line.slice(aS, aE), b = line.slice(bS, bE);
+    return line.slice(0, aS) + b + line.slice(aE, bS) + a + line.slice(bE);
   }
 
   /** Append a code snippet to the end of the document as a single undoable
@@ -357,10 +499,15 @@ class EditorManager {
       maxDeviation: draft ? EditorManager.DRAFT_RES : EditorManager.REST_RES,
       sceneOptions: this._app.viewport ? this._app.viewport.getSceneOptions() : undefined,
     }).then((result) => {
-      if (this._app.viewport && result.meshData) {
-        this._app.viewport.renderMeshData(result.meshData, result.sceneOptions, result.shapeRanges);
-        this._lastMeshedRes = draft ? EditorManager.DRAFT_RES : EditorManager.REST_RES;
-        this._scheduleRefine(performance.now() - evalStart);
+      if (this._app.viewport) {
+        // Construction planes ride along even when there's nothing to mesh
+        this._app.viewport.scenePlanes = result.scenePlanes || [];
+        this._app.viewport.refreshPlanePreview();
+        if (result.meshData) {
+          this._app.viewport.renderMeshData(result.meshData, result.sceneOptions, result.shapeRanges);
+          this._lastMeshedRes = draft ? EditorManager.DRAFT_RES : EditorManager.REST_RES;
+          this._scheduleRefine(performance.now() - evalStart);
+        }
       }
     }).catch((err) => {
       console.error("Evaluation error: " + err.message);

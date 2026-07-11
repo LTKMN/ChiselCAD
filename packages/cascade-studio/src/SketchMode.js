@@ -99,10 +99,30 @@ const SKETCH_PALETTE_DEFAULTS = {
   vertex: 0xffa726,  // Blender-ish mellow orange — must read against the bg
   glyphRel: '#9e9e9e', glyphDim: '#4CAF50', glyphSel: '#ffffff', glyphBad: '#ff5252',
 };
+
+/** Construction-plane color: the accent's hue-rotated complement, clamped to
+ *  stay saturated and mid-light. Derived (not fixed) so datums stay visually
+ *  distinct from the cardinal ghosts under ANY imported theme's accent. */
+function _derivePlaneColor(accentInt) {
+  const c = new THREE.Color(accentInt);
+  const hsl = {};
+  c.getHSL(hsl);
+  c.setHSL((hsl.h + 0.5) % 1, Math.max(0.45, hsl.s), Math.min(0.72, Math.max(0.55, hsl.l)));
+  return c.getHex();
+}
+
 let COLOR_ENTITY = SKETCH_PALETTE_DEFAULTS.entity;
 let COLOR_ACCENT = SKETCH_PALETTE_DEFAULTS.accent;
 let COLOR_REMOVE = SKETCH_PALETTE_DEFAULTS.remove;
 let COLOR_VERTEX = SKETCH_PALETTE_DEFAULTS.vertex;
+let COLOR_PLANE = _derivePlaneColor(SKETCH_PALETTE_DEFAULTS.accent);
+
+/** Construction-plane color, shared with the viewport's plane preview. */
+export function getPlaneColor() { return COLOR_PLANE; }
+
+/** Sketch accent color — the viewport's plane preview draws the offset BASE
+ *  in this color so it looks like the pick ghost it was chosen from. */
+export function getAccentColor() { return COLOR_ACCENT; }
 let GLYPH_REL = SKETCH_PALETTE_DEFAULTS.glyphRel;   // relation glyphs — quiet gray
 let GLYPH_DIM = SKETCH_PALETTE_DEFAULTS.glyphDim;   // dimension values — accent
 let GLYPH_SEL = SKETCH_PALETTE_DEFAULTS.glyphSel;   // selected glyph
@@ -115,6 +135,7 @@ export function applySketchTheme(sketch) {
   COLOR_ENTITY = sketch && sketch.entity ? hexToInt(sketch.entity) : SKETCH_PALETTE_DEFAULTS.entity;
   COLOR_ACCENT = sketch && sketch.accent ? hexToInt(sketch.accent) : SKETCH_PALETTE_DEFAULTS.accent;
   COLOR_VERTEX = sketch && sketch.vertex ? hexToInt(sketch.vertex) : SKETCH_PALETTE_DEFAULTS.vertex;
+  COLOR_PLANE = sketch && sketch.plane ? hexToInt(sketch.plane) : _derivePlaneColor(COLOR_ACCENT);
   GLYPH_REL = sketch && sketch.glyphRel ? sketch.glyphRel : SKETCH_PALETTE_DEFAULTS.glyphRel;
   GLYPH_DIM = sketch && sketch.glyphDim ? sketch.glyphDim : SKETCH_PALETTE_DEFAULTS.glyphDim;
 }
@@ -374,34 +395,74 @@ class SketchMode {
   //  sketch there. Orbit/pan stay live so you can look before you leap.
   // =====================================================================
 
-  _startPlanePick(btn) {
+  /** Prompt text for the current plane-pick purpose ('sketch' or 'plane'). */
+  _planePickPrompt() {
+    return this._planePick && this._planePick.purpose === 'plane'
+      ? 'New plane: click a ghost plane, construction plane, or flat model face to offset from (Esc cancels)'
+      : 'Pick a plane: click a ghost plane or a flat model face to sketch on (Esc cancels)';
+  }
+
+  /** Named construction planes from the last evaluation, as plane defs with
+   *  varName resolved from the editor line that assigned them (best-effort). */
+  _namedPlanes() {
+    const raw = (this._vp && this._vp.scenePlanes) || [];
+    const model = this._app.editor.editor ? this._app.editor.editor.getModel() : null;
+    const out = new Map(); // dedupe repeated registrations (loops, re-evals)
+    for (const p of raw) {
+      let name = null;
+      if (model && p.lineNumber >= 1 && p.lineNumber <= model.getLineCount()) {
+        const m = model.getLineContent(p.lineNumber).match(/^\s*(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=/);
+        if (m) { name = m[1]; }
+      }
+      const N = norm3(p.normal);
+      const X = norm3(p.xDir);
+      const pd = makePlane(p.origin, X, cross3(N, X), { label: name || 'plane' });
+      pd.varName = name;
+      out.set(name || p.origin.join(','), pd);
+    }
+    return [...out.values()];
+  }
+
+  _startPlanePick(btn, purpose = 'sketch') {
     if (this.active) { return; }
     this._endPick();
-    if (this._planePick) { this._endPlanePick(); return; } // toggle off
+    if (this._planePick) {
+      const samePurpose = this._planePick.purpose === purpose;
+      this._endPlanePick();
+      if (samePurpose) { return; } // toggle off
+    }
     const env = this._env;
     if (!env) { return; }
 
-    const S = 120; // ghost half-extent (world units)
     const group = new THREE.Group();
     const ghosts = [];
-    for (const key of ['XY', 'XZ', 'YZ']) {
-      const pd = CARDINAL[key]();
+    const addGhost = (pd, S, label, color = COLOR_ACCENT) => {
       const c = [[-S, -S], [S, -S], [S, S], [-S, S]].map(([a, b]) => pd.toThree(a, b));
       const fillGeo = new THREE.BufferGeometry().setFromPoints([c[0], c[1], c[2], c[0], c[2], c[3]]);
       const fill = new THREE.Mesh(fillGeo, new THREE.MeshBasicMaterial({
-        color: COLOR_ACCENT, transparent: true, opacity: 0.06,
+        color, transparent: true, opacity: 0.06,
         side: THREE.DoubleSide, depthWrite: false,
       }));
       const edge = new THREE.Line(new THREE.BufferGeometry().setFromPoints([...c, c[0]]),
-        new THREE.LineBasicMaterial({ color: COLOR_ACCENT, transparent: true, opacity: 0.3 }));
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.3 }));
       const g = new THREE.Group();
       g.add(fill, edge);
-      g.userData = { key, pd, fill, edge };
+      if (label) {
+        const spr = this._textSprite(label, '#' + color.toString(16).padStart(6, '0'));
+        spr.scale.set(9 * spr.userData.aspect, 9, 1);
+        spr.position.copy(pd.toThree(0, S * 0.7));
+        g.add(spr);
+      }
+      g.userData = { key: pd.key, pd, fill, edge };
       group.add(g);
       ghosts.push(g);
-    }
+    };
+    for (const key of ['XY', 'XZ', 'YZ']) { addGhost(CARDINAL[key](), 120); }
+    // Named construction planes are pick targets too — smaller quads, labeled,
+    // in the construction-plane color so they read as datums, not origin planes
+    for (const pd of this._namedPlanes()) { addGhost(pd, 80, pd.varName || 'plane', COLOR_PLANE); }
     env.scene.add(group);
-    this._planePick = { group, ghosts, faceHi: null, btn };
+    this._planePick = { group, ghosts, faceHi: null, btn, purpose };
     if (btn) { btn.classList.add('active'); }
 
     const canvas = env.renderer.domElement;
@@ -410,7 +471,7 @@ class SketchMode {
     this._planePick.listeners = [[canvas, 'mousemove', move], [window, 'keydown', key]];
     this._planePick.listeners.forEach(([el, ev, fn]) => el.addEventListener(ev, fn));
     canvas.style.cursor = 'crosshair';
-    this._hint.textContent = 'Pick a plane: click a ghost plane or a flat model face to sketch on (Esc cancels)';
+    this._hint.textContent = this._planePickPrompt();
     this._hint.style.display = '';
     env.viewDirty = true;
   }
@@ -466,14 +527,17 @@ class SketchMode {
       g.userData.edge.material.opacity = 0.3;
     }
     this._clearFaceHi();
-    let label = 'Pick a plane: click a ghost plane or a flat model face to sketch on (Esc cancels)';
+    const forPlane = this._planePick.purpose === 'plane';
+    const action = forPlane ? 'click to offset a new plane from here' : 'click to sketch here';
+    let label = this._planePickPrompt();
     if (hit && hit.type === 'ghost') {
       hit.g.userData.fill.material.opacity = 0.2;
       hit.g.userData.edge.material.opacity = 0.95;
-      label = hit.plane.label + ' plane — click to sketch here';
+      const nm = hit.plane.key ? hit.plane.label + ' plane' : hit.plane.label;
+      label = nm + ' — ' + action;
     } else if (hit && hit.type === 'face') {
       this._showFaceHi(hit.worldTris);
-      label = 'On this face — click to sketch here';
+      label = 'On this face — ' + action;
     }
     this._hint.textContent = label;
     this._hint.style.display = ''; // a misclick flash may have hidden it
@@ -523,11 +587,12 @@ class SketchMode {
     featureRow.className = 'cs-featbar-row';
     const FEATURES = [
       { id: 'sketch',    icon: '✎', label: 'Sketch',    hint: 'Sketch on a plane, then commit it to code (S)' },
+      { id: 'plane',     icon: '⬗', label: 'Plane',     hint: 'New construction plane: pick a plane or flat face, offset from it' },
       { sep: true },
-      { id: 'extrude',   icon: '⇈', label: 'Extrude',   hint: 'Extrude the last sketch into a solid (E)' },
-      { id: 'revolve',   icon: '⟲', label: 'Revolve',   hint: 'Revolve the last sketch around an axis' },
-      { id: 'loft',      icon: '⌒', label: 'Loft',      hint: 'Loft between the last two sketches' },
-      { id: 'pipe',      icon: '∿', label: 'Pipe',      hint: 'Sweep the last sketch along a path' },
+      { id: 'extrude',   icon: '⇈', label: 'Extrude',   hint: 'Extrude a sketch or a flat face — click it in the viewport (E)' },
+      { id: 'revolve',   icon: '⟲', label: 'Revolve',   hint: 'Revolve a sketch around an axis — click the profile' },
+      { id: 'loft',      icon: '⌒', label: 'Loft',      hint: 'Loft between two sketches — click each profile in the viewport' },
+      { id: 'pipe',      icon: '∿', label: 'Pipe',      hint: 'Sweep a sketch along a path — click the profile' },
       { sep: true },
       { id: 'fillet',    icon: '◠', label: 'Fillet',    hint: 'Round the top edges of the last solid' },
       { id: 'chamfer',   icon: '◺', label: 'Chamfer',   hint: 'Chamfer the top edges of the last solid' },
@@ -536,6 +601,7 @@ class SketchMode {
       { id: 'cut',       icon: '∖', label: 'Cut',       hint: 'Subtract the last solid from the one before it' },
       { id: 'intersect', icon: '∩', label: 'Intersect', hint: 'Keep the overlap of the last two solids' },
     ];
+    this._featBtns = {};  // feature id → button (hotkeys resolve through this)
     for (const f of FEATURES) {
       if (f.sep) {
         const s = document.createElement('span');
@@ -554,6 +620,7 @@ class SketchMode {
         b.blur();
       });
       if (f.id === 'sketch') { this._sketchBtn = b; }
+      this._featBtns[f.id] = b;
       featureRow.appendChild(b);
     }
 
@@ -721,10 +788,11 @@ class SketchMode {
     // Matches `let s = new Sketch(...)` and the multi-region group form
     // `let s = [  // comment\n  new Sketch(...)`; plane comes from the
     // first region. group=true marks an array-of-faces sketch.
-    const re = /^let\s+([A-Za-z_$][\w$]*)\s*=\s*(\[\s*(?:\/\/[^\n]*\s*)?)?new\s+Sketch\s*\(\s*\[[^\]]*\]\s*(?:,\s*(?:['"](XY|XZ|YZ)['"]|(\{)))?/gm;
+    const re = /^let\s+([A-Za-z_$][\w$]*)\s*=\s*(\[\s*(?:\/\/[^\n]*\s*)?)?new\s+Sketch\s*\(\s*\[[^\]]*\]\s*(?:,\s*(?:['"](XY|XZ|YZ)['"]|(\{)|([A-Za-z_$][\w$]*)))?/gm;
     for (const m of code.matchAll(re)) {
       seen.delete(m[1]);
-      seen.set(m[1], { plane: m[3] || (m[4] ? 'custom' : 'XY'), group: !!m[2] });
+      // m[4] = baked plane literal, m[5] = named construction plane variable
+      seen.set(m[1], { plane: m[3] || ((m[4] || m[5]) ? 'custom' : 'XY'), group: !!m[2] });
     }
     return [...seen.entries()].map(([name, v]) => ({ name, plane: v.plane, group: v.group }));
   }
@@ -760,13 +828,19 @@ class SketchMode {
   }
 
   _runFeature(id, btn) {
-    if (id === 'sketch') {
-      if (!this.active) { this._startPlanePick(btn); }
+    // Hotkeys (E, S) call without a button — resolve it so it still lights up
+    btn = btn || (this._featBtns && this._featBtns[id]) || null;
+    if (id === 'sketch' || id === 'plane') {
+      if (!this.active) { this._startPlanePick(btn, id); }
       return;
     }
 
-    // Targeted features pick their operands by clicking shapes in the viewport
+    // Every feature picks its operands by clicking shapes in the viewport
     const PICKS = {
+      extrude:   ['Extrude: click a sketch, or a flat face of a solid (Esc cancels)'],
+      revolve:   ['Revolve: click the profile sketch (Esc cancels)'],
+      loft:      ['Loft: click the first profile sketch', 'Loft: click the profile sketch to loft to'],
+      pipe:      ['Pipe: click the profile sketch (Esc cancels)'],
       fillet:    ['Fillet: click the solid to fillet (Esc cancels)'],
       chamfer:   ['Chamfer: click the solid to chamfer (Esc cancels)'],
       union:     ['Union: click the first body', 'Union: click the body or sketch to fuse into it'],
@@ -776,60 +850,42 @@ class SketchMode {
     if (PICKS[id]) {
       if (this._pick && this._pick.feature === id) { this._endPick(); return; } // toggle off
       this._startPick(id, btn, PICKS[id]);
-      return;
     }
+  }
 
+  /** Emit a named construction plane offset from the picked base (a cardinal
+   *  ghost, a model face, or another construction plane). The offset literal
+   *  is pre-selected in the editor for immediate typing; once evaluated, the
+   *  plane becomes a pick target when starting a sketch. */
+  _emitPlane(pd) {
     const code = this._app.editor.getCode();
-    const sketches = this._findSketches(code);
-    const lastSk = sketches[sketches.length - 1];
-    const nv = (base) => this._nextVarName(code, base);
-    let snippet = null, select = null;
-
-    switch (id) {
-      case 'extrude': {
-        if (!lastSk) { return this._flashHint('Extrude needs a sketch — draw one first'); }
-        snippet = `let ${nv('solid')} = Extrude(${lastSk.name}, ${this._extrudeDirFor(lastSk.plane)});`;
-        select = '20(?=[,)\\]])';
-        break;
-      }
-      case 'revolve': {
-        if (!lastSk) { return this._flashHint('Revolve needs a sketch — draw one first'); }
-        if (lastSk.group) { return this._flashHint('Revolve needs a single-region sketch — this one has several islands'); }
-        if (lastSk.plane === 'XY') {
-          snippet = `// XY profiles revolve around X (revolving around Z would give a flat disk)\n` +
-                    `let ${nv('solid')} = Revolve(${lastSk.name}, 360, [1, 0, 0]);`;
-        } else {
-          snippet = `let ${nv('solid')} = Revolve(${lastSk.name}, 360, [0, 0, 1]);`;
-        }
-        select = '360';
-        break;
-      }
-      case 'loft': {
-        if (sketches.length < 2) { return this._flashHint('Loft needs two sketches (profiles at different positions)'); }
-        const a = sketches[sketches.length - 2];
-        if (a.group || lastSk.group) { return this._flashHint('Loft needs single-region sketches — one of these has several islands'); }
-        snippet = `let ${nv('solid')} = Loft([GetWire(${a.name}), GetWire(${lastSk.name})]);`;
-        break;
-      }
-      case 'pipe': {
-        if (!lastSk) { return this._flashHint('Pipe needs a sketch profile — draw one first'); }
-        if (lastSk.group) { return this._flashHint('Pipe needs a single-region sketch profile — this one has several islands'); }
-        const paths = {
-          XY: '[[0, 0, 0], [0, 0, 30], [20, 0, 60]]',
-          XZ: '[[0, 0, 0], [0, -30, 0], [20, -60, 0]]',
-          YZ: '[[0, 0, 0], [30, 0, 0], [60, 0, 20]]',
-        };
-        const pathVar = nv('path');
-        snippet = `let ${pathVar} = BSpline(${paths[lastSk.plane] || paths.XY}, false);\n` +
-                  `let ${nv('solid')} = Pipe(${lastSk.name}, ${pathVar});`;
-        break;
-      }
+    const name = this._nextVarName(code, 'plane');
+    const vec = (v) => `[${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])}]`;
+    let baseExpr, desc;
+    if (pd.varName) {
+      baseExpr = pd.varName;
+      desc = `offset from ${pd.varName}`;
+    } else if (pd.key) {
+      baseExpr = `'${pd.key}'`;
+      desc = `offset from ${pd.key}`;
+    } else {
+      baseExpr = `{ origin: ${vec(pd.occOrigin)}, normal: ${vec(pd.occNormal)}, xDir: ${vec(pd.occX)} }`;
+      desc = `offset from face @ ${vec(pd.occOrigin)}`;
     }
+    const snippet = `// --- Construction plane (${desc}) ---\nlet ${name} = Plane(${baseExpr}, 10);`;
+    this._app.editor.appendCode(snippet, '10(?=\\);)');
+    this._flashHint(`${name} added — type its offset, then pick it when starting a sketch`);
+  }
 
-    if (snippet) {
-      this._app.editor.appendCode(snippet, select);
-      if (this._vp) { this._vp.shakeOnNextRender(0.5); }  // thunk when the model lands
-    }
+  /** Emit an extrusion of a picked flat face of a solid. ExtrudeFace makes
+   *  a standalone prism off the face's outward normal — Union it for a
+   *  boss, Cut it for a pocket — with the distance pre-selected. */
+  _emitExtrudeFace(name, faceIndex) {
+    const code = this._app.editor.getCode();
+    const snippet = `let ${this._nextVarName(code, 'solid')} = ExtrudeFace(${name}, ${faceIndex}, 15);`;
+    this._app.editor.appendCode(snippet, '15(?=\\);)');
+    this._flashHint(`Extruding face ${faceIndex} of ${name} — type the distance (negative goes into the body)`);
+    if (this._vp) { this._vp.shakeOnNextRender(0.5); }
   }
 
   // =====================================================================
@@ -841,35 +897,92 @@ class SketchMode {
     this._endPick();
     if (this.active) { return; } // not while sketching
     this._pick = { feature, btn, prompts, picked: [] };
-    btn.classList.add('active');
+    if (btn) { btn.classList.add('active'); }
     this._hint.textContent = prompts[0];
     this._hint.style.display = '';
     this._pickKeyFn = (e) => {
       if (e.key === 'Escape') { this._endPick(); }
     };
     window.addEventListener('keydown', this._pickKeyFn);
+
+    // Hover affordance: the shape under the cursor glows softly so it's
+    // obvious what a click would pick; the cursor flips to a pointer on it.
+    // Extrude picks FACES on solids, so there the hovered flat face lights
+    // up instead of the whole body (sketches still glow whole).
+    const canvas = this._env ? this._env.renderer.domElement : null;
+    if (canvas) {
+      this._pickMoveFn = (e) => {
+        if (!this._pick || e.buttons !== 0) { return; } // skip mid-orbit/pan
+        this._lastClient = [e.clientX, e.clientY];
+        const info = this._vp.shapeInfoAtMouse(e);
+        if (this._pick.feature === 'extrude' && info && !info.sketch) {
+          this._vp.setPickHover(-1);
+          const face = this._vp.pickFaceAt(e);
+          this._showPickFaceHi(face ? face.worldTris : null);
+          canvas.style.cursor = face ? 'pointer' : 'crosshair';
+          return;
+        }
+        this._showPickFaceHi(null);
+        const line = (info && info.definingLine >= 1) ? info.definingLine : -1;
+        this._vp.setPickHover(line);
+        canvas.style.cursor = line >= 1 ? 'pointer' : 'crosshair';
+      };
+      canvas.addEventListener('mousemove', this._pickMoveFn);
+      canvas.style.cursor = 'crosshair';
+    }
+  }
+
+  /** Hover highlight for a flat face candidate in pick mode (extrude). */
+  _showPickFaceHi(worldTris) {
+    if (this._pickFaceHi) {
+      this._env.scene.remove(this._pickFaceHi);
+      this._pickFaceHi.geometry.dispose();
+      this._pickFaceHi.material.dispose();
+      this._pickFaceHi = null;
+      this._env.viewDirty = true;
+    }
+    if (!worldTris || worldTris.length === 0) { return; }
+    const geo = new THREE.BufferGeometry().setFromPoints(worldTris);
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      color: COLOR_ACCENT, transparent: true, opacity: 0.28,
+      side: THREE.DoubleSide, depthWrite: false, depthTest: false,
+    }));
+    mesh.renderOrder = 996;
+    this._env.scene.add(mesh);
+    this._pickFaceHi = mesh;
+    this._env.viewDirty = true;
   }
 
   _endPick() {
     if (!this._pick) { return; }
-    this._pick.btn.classList.remove('active');
+    if (this._pick.btn) { this._pick.btn.classList.remove('active'); }
     this._pick = null;
     if (this._pickKeyFn) {
       window.removeEventListener('keydown', this._pickKeyFn);
       this._pickKeyFn = null;
     }
+    if (this._pickMoveFn) {
+      const canvas = this._env ? this._env.renderer.domElement : null;
+      if (canvas) {
+        canvas.removeEventListener('mousemove', this._pickMoveFn);
+        canvas.style.cursor = '';
+      }
+      this._pickMoveFn = null;
+    }
+    this._showPickFaceHi(null);
     if (!this.active) { this._hint.style.display = 'none'; }
-    if (this._vp) { this._vp.highlightShapesAtLine(-1); } // clear pick glow
+    if (this._vp) { this._vp.clearPickHighlights(); }
   }
 
   /** Called by the viewport on non-drag clicks. Returns true if consumed. */
   handleViewportClick(e) {
     if (this._planePick) {
+      const purpose = this._planePick.purpose;
       const hit = this._planePickHit(e);
       if (hit) {
         const pd = hit.plane;
         this._endPlanePick();
-        this.begin(pd);
+        if (purpose === 'plane') { this._emitPlane(pd); } else { this.begin(pd); }
       } else {
         this._flashHint('No plane there — click a ghost plane or a flat model face (Esc cancels)');
         this._hint.style.display = '';
@@ -908,6 +1021,20 @@ class SketchMode {
       return true;
     }
     const name = m[1];
+
+    // Extrude on a solid targets the clicked FACE, not the whole body
+    if (pick.feature === 'extrude' && !info.sketch) {
+      const face = this._vp.pickFaceAt(e);
+      if (!face || face.localFaceIndex === undefined || face.localFaceIndex === null) {
+        this._flashHint('Extrude needs a sketch or a FLAT face — that one is curved (Esc cancels)');
+        this._hint.style.display = '';
+        return true;
+      }
+      this._endPick();
+      this._emitExtrudeFace(name, face.localFaceIndex);
+      return true;
+    }
+
     if (pick.picked.includes(name)) {
       this._flashHint(`Already picked ${name} — click a different shape`);
       this._hint.style.display = '';
@@ -915,7 +1042,7 @@ class SketchMode {
     }
 
     pick.picked.push(name);
-    this._vp.highlightShapesAtLine(info.definingLine); // glow acknowledgment
+    this._vp.addPickHighlight(info.definingLine); // stays lit until the pick resolves
 
     if (pick.picked.length < pick.prompts.length) {
       this._hint.textContent = pick.prompts[pick.picked.length] + ` (picked: ${name})`;
@@ -950,6 +1077,49 @@ class SketchMode {
     let snippet = null, select = anyWrapped ? '-?20(?=[,)\\]])' : null;
 
     switch (feature) {
+      case 'extrude': {
+        const sk = sketchOf(picked[0]);
+        if (!sk) { return this._flashHint('Extrude needs a sketch or a flat face — ' + picked[0] + ' is a solid'); }
+        snippet = `let ${nv('solid')} = Extrude(${picked[0]}, ${this._extrudeDirFor(sk.plane)});`;
+        select = '20(?=[,)\\]])';
+        break;
+      }
+      case 'revolve': {
+        const sk = sketchOf(picked[0]);
+        if (!sk) { return this._flashHint('Revolve needs a sketch profile — ' + picked[0] + ' is a solid'); }
+        if (sk.group) { return this._flashHint('Revolve needs a single-region sketch — this one has several islands'); }
+        if (sk.plane === 'XY') {
+          snippet = `// XY profiles revolve around X (revolving around Z would give a flat disk)\n` +
+                    `let ${nv('solid')} = Revolve(${picked[0]}, 360, [1, 0, 0]);`;
+        } else {
+          snippet = `let ${nv('solid')} = Revolve(${picked[0]}, 360, [0, 0, 1]);`;
+        }
+        select = '360';
+        break;
+      }
+      case 'pipe': {
+        const sk = sketchOf(picked[0]);
+        if (!sk) { return this._flashHint('Pipe needs a sketch profile — ' + picked[0] + ' is a solid'); }
+        if (sk.group) { return this._flashHint('Pipe needs a single-region sketch profile — this one has several islands'); }
+        const paths = {
+          XY: '[[0, 0, 0], [0, 0, 30], [20, 0, 60]]',
+          XZ: '[[0, 0, 0], [0, -30, 0], [20, -60, 0]]',
+          YZ: '[[0, 0, 0], [30, 0, 0], [60, 0, 20]]',
+        };
+        const pathVar = nv('path');
+        snippet = `let ${pathVar} = BSpline(${paths[sk.plane] || paths.XY}, false);\n` +
+                  `let ${nv('solid')} = Pipe(${picked[0]}, ${pathVar});`;
+        select = null;
+        break;
+      }
+      case 'loft': {
+        const a = sketchOf(picked[0]), b = sketchOf(picked[1]);
+        if (!a || !b) { return this._flashHint('Loft needs sketch profiles — ' + (a ? picked[1] : picked[0]) + ' is a solid'); }
+        if (a.group || b.group) { return this._flashHint('Loft needs single-region sketches — one of these has several islands'); }
+        snippet = `let ${nv('solid')} = Loft([GetWire(${picked[0]}), GetWire(${picked[1]})]);`;
+        select = null; // nothing to type over — the picks were the parameters
+        break;
+      }
       case 'fillet':
       case 'chamfer': {
         const t = picked[0];
@@ -2995,6 +3165,11 @@ class SketchMode {
     if (def.key) {
       planeArg = def.key === 'XY' ? '' : `, '${def.key}'`;
       header = `// --- Sketch (${def.key} plane) ---`;
+    } else if (def.varName) {
+      // Named construction plane: reference the variable, so editing the
+      // plane's offset later moves every sketch that lives on it
+      planeArg = `, ${def.varName}`;
+      header = `// --- Sketch (on ${def.varName}) ---`;
     } else {
       // Baked face plane: origin + normal + xDir are literals, so the sketch
       // stays put even if the underlying body later changes (code is the artifact).
