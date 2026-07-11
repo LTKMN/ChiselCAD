@@ -74,12 +74,16 @@ Use `-c-1` to disable caching, and a **new port** whenever you change JS, since 
 
 ### The sketch → feature → code loop
 
-1. Click **✎ Sketch** in the command bar and pick a plane. The view flattens and the sketch tools appear.
-2. Draw with **Line / Rect / Circle** (keys `L` / `R` / `C`). Endpoints snap to existing points, the origin, and the grid.
+1. Click **✎ Sketch** `S` in the command bar and pick a plane. The view flattens and the sketch tools appear.
+2. Draw with **Line / Rect / Circle** (keys `L` / `R` / `C`). Endpoints snap to existing points, the origin, and the grid. `T` to trim lines from other lines.
 3. Switch to **Select**, then add relations from the Relations row or with the hotkeys — `A`nchor, `H`orizontal, `V`ertical, `P`arallel, perpendicular (`X`), `E`qual, concentric (`Q`), tan`G`ent. Drag points to see the solver hold everything together.
 4. Use **Dimension** (`D`) to pin a length or radius. Type a number for an exact value, or a *word* to create a `let` variable the sketch drives.
-5. **Save** — the sketch is written into the editor as code.
-6. Back in feature mode, click **Extrude** (or Revolve / Loft / Pipe), or **Cut** / **Union** / **Fillet** and click the bodies involved. Tweak the pre-selected number and the model updates live.
+5. **Save** `ENTER` — the sketch is written into the editor as code.
+6. Back in feature mode, click **Extrude** `E` (or Revolve / Loft / Pipe -- still beta), to make bodies from sketches.
+
+Then: **Cut** / **Union** / **Intersect** and click the bodies involved. (first: the body effected, second: the body effecting it)
+
+Or fillet and chamfer edges by selecting them in the 3D view, and adjusting the values in the code.
 
 ### Standard Library
 
@@ -144,25 +148,6 @@ difference() {
     cube([20, 20, 20], center=true);
     sphere(r=12);
 }
-```
-
-### Using cascade-core in Your Own Project
-
-The CAD engine is a standalone package with no GUI dependencies:
-
-```javascript
-import { CascadeEngine } from 'cascade-core';
-
-const engine = new CascadeEngine({ workerUrl: './cascade-worker.js' });
-await engine.init();
-
-const result = await engine.evaluate(`
-  let box = Box(20, 20, 20);
-  FilletEdges(box, 3, Edges(box).max([0,0,1]).indices());
-`);
-
-// result.meshData = { faces: [...], edges: [...] }
-// Render with Three.js, Babylon.js, or any WebGL framework
 ```
 
 ## Agent API
