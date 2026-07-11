@@ -74,12 +74,16 @@ Use `-c-1` to disable caching, and a **new port** whenever you change JS, since 
 
 ### The sketch → feature → code loop
 
-1. Click **✎ Sketch** in the command bar and pick a plane. The view flattens and the sketch tools appear.
-2. Draw with **Line / Rect / Circle** (keys `L` / `R` / `C`). Endpoints snap to existing points, the origin, and the grid.
+1. Click **✎ Sketch** `S` in the command bar and pick a plane. The view flattens and the sketch tools appear.
+2. Draw with **Line / Rect / Circle** (keys `L` / `R` / `C`). Endpoints snap to existing points, the origin, and the grid. `T` to trim lines from other lines.
 3. Switch to **Select**, then add relations from the Relations row or with the hotkeys — `A`nchor, `H`orizontal, `V`ertical, `P`arallel, perpendicular (`X`), `E`qual, concentric (`Q`), tan`G`ent. Drag points to see the solver hold everything together.
 4. Use **Dimension** (`D`) to pin a length or radius. Type a number for an exact value, or a *word* to create a `let` variable the sketch drives.
-5. **Save** — the sketch is written into the editor as code.
-6. Back in feature mode, click **Extrude** (or Revolve / Loft / Pipe), or **Cut** / **Union** / **Fillet** and click the bodies involved. Tweak the pre-selected number and the model updates live.
+5. **Save** `ENTER` — the sketch is written into the editor as code.
+6. Back in feature mode, click **Extrude** `E` (or Revolve / Loft / Pipe -- still beta), to make bodies from sketches.
+
+Then: **Cut** / **Union** / **Intersect** and click the bodies involved. (first: the body effected, second: the body effecting it)
+
+Or fillet and chamfer edges by selecting them in the 3D view, and adjusting the values in the code.
 
 ### Standard Library
 
@@ -146,25 +150,6 @@ difference() {
 }
 ```
 
-### Using cascade-core in Your Own Project
-
-The CAD engine is a standalone package with no GUI dependencies:
-
-```javascript
-import { CascadeEngine } from 'cascade-core';
-
-const engine = new CascadeEngine({ workerUrl: './cascade-worker.js' });
-await engine.init();
-
-const result = await engine.evaluate(`
-  let box = Box(20, 20, 20);
-  FilletEdges(box, 3, Edges(box).max([0,0,1]).indices());
-`);
-
-// result.meshData = { faces: [...], edges: [...] }
-// Render with Three.js, Babylon.js, or any WebGL framework
-```
-
 ## Agent API
 
 ChiselCAD exposes `window.CascadeAPI` for programmatic control via [Playwright](https://playwright.dev/) or other browser automation.
@@ -198,6 +183,12 @@ npm run build
 npx playwright test    # 12 tests, ~25s
 ```
 
+There is also primitive support for LLMs in the loop natively. In the top menu there's API access for either Anthropic or Openrouter (all API keys and data are local to your browser, Chisel has no central server or any user data of any kind) and then a chat interface in the bottom left bar. This is extremely beta, but I'd love to hear what did / didn't work for you, and eventually which models seem to be adequate. I've been using Fable so far but that's probably overkill.
+
+You can also copy/paste into any LLM chat window, there's a prompt (quasi-skill) in that menu to get started with. Testing so far as been encouragingly successful.
+
+
+
 ## Credits
 
 ChiselCAD is a fork of **[CascadeStudio](https://github.com/zalo/CascadeStudio)** by [Johnathon Selstad (@zalo)](https://github.com/zalo) — all of the kernel, standard library, editor and engine groundwork is his, and remains under his MIT license
@@ -214,6 +205,10 @@ Built on:
 - [potpack](https://github.com/mapbox/potpack) — texture atlas packing
 - [esbuild](https://github.com/evanw/esbuild) — bundler
 - [Playwright](https://playwright.dev/) — testing
+
+Dedication:
+
+For Alex
 
 ## License
 
