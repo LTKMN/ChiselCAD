@@ -138,6 +138,27 @@ class CascadeStudioApp {
       }
 
       if (!this.viewport || (this.sketchMode && this.sketchMode.active)) { return; }
+
+      // E = Extrude in object mode (in sketch mode E is the "equal" relation,
+      // handled by SketchMode's own listener — we already returned above).
+      // Transform-gizmo handles claim W/E/R while present (E = rotate mode),
+      // and pick mode owns the interaction — yield to both.
+      if (e.key.toLowerCase() === 'e' && !e.shiftKey && this.sketchMode) {
+        if (this.viewport.handles && this.viewport.handles.length) { return; }
+        if (this.sketchMode._pick) { return; }
+        this.sketchMode._runFeature('extrude');
+        e.preventDefault(); // don't also type into the editor
+        return;
+      }
+
+      // S = start a Sketch: enters plane/face pick (S again toggles it off,
+      // Esc cancels). Gizmo handles don't use S, so no yield needed.
+      if (e.key.toLowerCase() === 's' && !e.shiftKey && this.sketchMode) {
+        this.sketchMode._runFeature('sketch');
+        e.preventDefault();
+        return;
+      }
+
       const digit = (e.code.match(/^(?:Digit|Numpad)([1357])$/) || [])[1];
       if (!digit) { return; }
       if (digit === '7') { this.viewport.setViewPreset(e.shiftKey ? 'bottom' : 'top'); }

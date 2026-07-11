@@ -144,6 +144,17 @@ class CascadeEnvironment {
       polygonOffsetUnits: 1.0
     });
 
+    // Bare sketch faces (2D profiles awaiting a feature) render as
+    // double-sided translucent ghosts — visible from behind, and clearly
+    // "profile, not geometry". Tinted by the theme's glow color.
+    this.sketchGhostMaterial = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(this._vtheme.glow),
+      transparent: true,
+      opacity: 0.18,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+
     // Store dependencies for export methods
     this._getNewFileHandle = getNewFileHandle;
     this._writeFile = writeFile;
@@ -294,7 +305,7 @@ class CascadeEnvironment {
 
     this._updateGroundAndGrid(sceneOptions);
 
-    this.mainObject = this._buildObjectFromMesh(facelist, edgelist);
+    this.mainObject = this._buildObjectFromMesh(facelist, edgelist, this._shapeRanges);
 
     this.boundingBox = new THREE.Box3().setFromObject(this.mainObject);
 
@@ -489,48 +500,76 @@ class CascadeEnvironment {
     env.viewDirty = true;
   }
 
-  /** Build a THREE.Group from facelist/edgelist mesh data. */
-  _buildObjectFromMesh(facelist, edgelist) {
+  /** Build a THREE.Group from facelist/edgelist mesh data. With shapeRanges,
+   *  BRep faces belonging to bare sketch shapes split into a second
+   *  double-sided ghost mesh; absolute global face indices are preserved so
+   *  provenance (click → code) works identically across both meshes. */
+  _buildObjectFromMesh(facelist, edgelist, shapeRanges) {
     let group = new THREE.Group();
     group.name = "shape";
     group.rotation.x = -Math.PI / 2;
 
-    // Add Triangulated Faces to Object
-    let vertices = [], normals = [], triangles = [], uvs = [], colors = [];
-    let vInd = 0; let globalFaceIndex = 0;
-    facelist.forEach((face) => {
-      vertices.push(...face.vertex_coord);
-      normals.push(...face.normal_coord);
-      uvs.push(...face.uv_coord);
+    // Global face indices owned by bare sketch shapes (2D profiles)
+    let ghostGfi = null;
+    if (shapeRanges && shapeRanges.some(r => r.sketch)) {
+      ghostGfi = new Set();
+      let cum = 0;
+      for (const r of shapeRanges) {
+        if (r.sketch) { for (let i = 0; i < r.faceCount; i++) { ghostGfi.add(cum + i); } }
+        cum += r.faceCount;
+      }
+    }
 
-      for (let i = 0; i < face.tri_indexes.length; i += 3) {
-        triangles.push(
-          face.tri_indexes[i + 0] + vInd,
-          face.tri_indexes[i + 1] + vInd,
-          face.tri_indexes[i + 2] + vInd
-        );
+    // Add Triangulated Faces to Object — one mesh per bucket (solid/ghost)
+    const buildFaceMesh = (entries, material) => {
+      let vertices = [], normals = [], triangles = [], uvs = [], colors = [];
+      let vInd = 0;
+      for (const { face, gfi } of entries) {
+        vertices.push(...face.vertex_coord);
+        normals.push(...face.normal_coord);
+        uvs.push(...face.uv_coord);
+
+        for (let i = 0; i < face.tri_indexes.length; i += 3) {
+          triangles.push(
+            face.tri_indexes[i + 0] + vInd,
+            face.tri_indexes[i + 1] + vInd,
+            face.tri_indexes[i + 2] + vInd
+          );
+        }
+
+        for (let i = 0; i < face.vertex_coord.length; i += 3) {
+          colors.push(face.face_index, gfi, 0);
+        }
+
+        vInd += face.vertex_coord.length / 3;
       }
 
-      for (let i = 0; i < face.vertex_coord.length; i += 3) {
-        colors.push(face.face_index, globalFaceIndex, 0);
-      }
+      let geometry = new THREE.BufferGeometry();
+      geometry.setIndex(triangles);
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+      geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+      geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+      geometry.setAttribute('uv2', new THREE.Float32BufferAttribute(uvs, 2));
+      geometry.computeBoundingSphere();
+      geometry.computeBoundingBox();
+      let mesh = new THREE.Mesh(geometry, material);
+      mesh.name = "Model Faces";  // both buckets pick/raycast identically
+      return mesh;
+    };
 
-      globalFaceIndex++;
-      vInd += face.vertex_coord.length / 3;
+    const solidEntries = [], ghostEntries = [];
+    facelist.forEach((face, gfi) => {
+      ((ghostGfi && ghostGfi.has(gfi)) ? ghostEntries : solidEntries).push({ face, gfi });
     });
 
-    let geometry = new THREE.BufferGeometry();
-    geometry.setIndex(triangles);
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
-    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-    geometry.setAttribute('uv2', new THREE.Float32BufferAttribute(uvs, 2));
-    geometry.computeBoundingSphere();
-    geometry.computeBoundingBox();
-    let model = new THREE.Mesh(geometry, this.matcapMaterial);
-    model.name = "Model Faces";
-    group.add(model);
+    group.add(buildFaceMesh(solidEntries, this.matcapMaterial));
+    if (ghostEntries.length) {
+      const ghosts = buildFaceMesh(ghostEntries, this.sketchGhostMaterial);
+      ghosts.renderOrder = 1;         // draw after opaque solids
+      ghosts.userData.isGhost = true; // hover tint skips ghosts (see _animate)
+      group.add(ghosts);
+    }
 
     // Add Highlightable Edges to Object
     let lineVertices = []; let globalEdgeIndices = [];
@@ -947,6 +986,8 @@ class CascadeEnvironment {
 
     // Repaint existing model edges with the new wire color
     env.scene.traverse((obj) => { if (obj.clearHighlights) { obj.clearHighlights(); } });
+    // Sketch ghosts follow the theme's glow color
+    if (this.sketchGhostMaterial) { this.sketchGhostMaterial.color.set(this._vtheme.glow); }
     env.viewDirty = true;
   }
 
@@ -1319,7 +1360,12 @@ class CascadeEnvironment {
           }
           this.highlightedObj = intersects[0].object;
           this.highlightedObj.currentHex = this.highlightedObj.material.color.getHex();
-          this.highlightedObj.material.color.setHex(0xffffff);
+          // Whitening the whole material is imperceptible on the near-white
+          // matcap but glaring on translucent sketch ghosts — skip those
+          // (restore paths then re-set the unchanged color, harmlessly)
+          if (!this.highlightedObj.userData.isGhost) {
+            this.highlightedObj.material.color.setHex(0xffffff);
+          }
           this.highlightedIndex = newIndex;
           if (isLine) { this.highlightedObj.highlightEdgeAtLineIndex(intersects[0].index); }
           this.environment.viewDirty = true;

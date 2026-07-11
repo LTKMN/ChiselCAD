@@ -96,11 +96,13 @@ const GLYPHS = {
 // (colors are read at draw/creation time; applies from the next repaint on)
 const SKETCH_PALETTE_DEFAULTS = {
   entity: 0xe8e8e8, accent: 0x4CAF50, remove: 0xff7043,
+  vertex: 0xffa726,  // Blender-ish mellow orange — must read against the bg
   glyphRel: '#9e9e9e', glyphDim: '#4CAF50', glyphSel: '#ffffff', glyphBad: '#ff5252',
 };
 let COLOR_ENTITY = SKETCH_PALETTE_DEFAULTS.entity;
 let COLOR_ACCENT = SKETCH_PALETTE_DEFAULTS.accent;
 let COLOR_REMOVE = SKETCH_PALETTE_DEFAULTS.remove;
+let COLOR_VERTEX = SKETCH_PALETTE_DEFAULTS.vertex;
 let GLYPH_REL = SKETCH_PALETTE_DEFAULTS.glyphRel;   // relation glyphs — quiet gray
 let GLYPH_DIM = SKETCH_PALETTE_DEFAULTS.glyphDim;   // dimension values — accent
 let GLYPH_SEL = SKETCH_PALETTE_DEFAULTS.glyphSel;   // selected glyph
@@ -112,6 +114,7 @@ export function applySketchTheme(sketch) {
   const hexToInt = (h) => parseInt(String(h).replace('#', ''), 16);
   COLOR_ENTITY = sketch && sketch.entity ? hexToInt(sketch.entity) : SKETCH_PALETTE_DEFAULTS.entity;
   COLOR_ACCENT = sketch && sketch.accent ? hexToInt(sketch.accent) : SKETCH_PALETTE_DEFAULTS.accent;
+  COLOR_VERTEX = sketch && sketch.vertex ? hexToInt(sketch.vertex) : SKETCH_PALETTE_DEFAULTS.vertex;
   GLYPH_REL = sketch && sketch.glyphRel ? sketch.glyphRel : SKETCH_PALETTE_DEFAULTS.glyphRel;
   GLYPH_DIM = sketch && sketch.glyphDim ? sketch.glyphDim : SKETCH_PALETTE_DEFAULTS.glyphDim;
 }
@@ -519,9 +522,9 @@ class SketchMode {
     const featureRow = document.createElement('div');
     featureRow.className = 'cs-featbar-row';
     const FEATURES = [
-      { id: 'sketch',    icon: '✎', label: 'Sketch',    hint: 'Sketch on a plane, then commit it to code' },
+      { id: 'sketch',    icon: '✎', label: 'Sketch',    hint: 'Sketch on a plane, then commit it to code (S)' },
       { sep: true },
-      { id: 'extrude',   icon: '⇈', label: 'Extrude',   hint: 'Extrude the last sketch into a solid' },
+      { id: 'extrude',   icon: '⇈', label: 'Extrude',   hint: 'Extrude the last sketch into a solid (E)' },
       { id: 'revolve',   icon: '⟲', label: 'Revolve',   hint: 'Revolve the last sketch around an axis' },
       { id: 'loft',      icon: '⌒', label: 'Loft',      hint: 'Loft between the last two sketches' },
       { id: 'pipe',      icon: '∿', label: 'Pipe',      hint: 'Sweep the last sketch along a path' },
@@ -583,7 +586,7 @@ class SketchMode {
     save.className = 'sketch-tool-btn sketch-save-btn';
     save.type = 'button';
     save.textContent = '✓ Save';
-    save.title = 'Commit this sketch to code';
+    save.title = 'Commit this sketch to code (Enter)';
     save.addEventListener('click', () => this.end(true));
     sketchRow.appendChild(save);
 
@@ -2184,8 +2187,14 @@ class SketchMode {
       }
       this._renderPreview();
     } else if (e.key === 'Enter') {
-      this._endChain();
-      this._renderPreview();
+      // Mid-gesture Enter finishes the gesture (ends the current chain);
+      // idle Enter commits the whole sketch — same as the Save button
+      if (this._chainPrev || this._rectStart || this._circleCenter) {
+        this._endChain();
+        this._renderPreview();
+      } else {
+        this.end(true);
+      }
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && this.tool === 'select' && this._sel.length) {
       this._pushUndo();
       const entIds = this._sel.filter(s => s.kind === 'ent').map(s => s.id)
@@ -2746,7 +2755,7 @@ class SketchMode {
         m.renderOrder = 999;
         this._entityGroup.add(m);
       };
-      mkPts(norm, 5, 0xbdbdbd);
+      mkPts(norm, 5, COLOR_VERTEX);
       mkPts(sel, 9, COLOR_ACCENT);
     }
 

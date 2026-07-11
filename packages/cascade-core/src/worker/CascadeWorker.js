@@ -254,6 +254,9 @@ class CascadeStudioWorker {
         shapeRanges.push({
           hash: self.sceneShapes[shapeInd].hash !== undefined ? self.sceneShapes[shapeInd].hash : null,
           faceCount: faceCount,
+          // FACE/WIRE/EDGE (enum ≥ 4) = a bare 2D profile awaiting a feature
+          // — the viewport renders these as double-sided ghosts
+          sketch: self.sceneShapes[shapeInd].ShapeType().value >= 4,
         });
 
         sceneBuilder.Add(self.currentShape, self.sceneShapes[shapeInd]);

@@ -277,6 +277,9 @@ export class ThemeManager {
     const sketch = {
       entity: at(v3d, 'wire_edit', wire),
       accent: sketchAccent,
+      // Point markers borrow Blender's vertex SELECT color (plain `vertex`
+      // is usually black — invisible on a dark viewport background)
+      vertex: at(v3d, 'vertex_select', '#ffa726'),
       glyphRel: mix(at(v3d, 'wire_edit', wire), bgBottom, 0.4),
       glyphDim: sketchAccent,
     };
