@@ -15,13 +15,16 @@ const COLLAPSED_KEY = 'chiselcad-llm-chat-collapsed';
 const MODEL_KEY_PREFIX = 'chiselcad-llm-model-'; // + provider
 const MAX_LOOP_ITERATIONS = 15;
 const SCREENSHOT_MAX_DIM = 768;
+const ATTACH_MAX_DIM = 1024;   // user-attached images get a bit more detail
+const MAX_ATTACHMENTS = 6;
 
 export class LLMChat {
   constructor(app) {
     this.app = app;
     this._root = null;
-    this._transcript = [];   // [{role: 'user'|'assistant'|'activity'|'error', text}]
+    this._transcript = [];   // [{role: 'user'|'assistant'|'activity'|'error', text, images?}]
     this._apiMessages = [];  // provider-format conversation (reset on provider change)
+    this._attachments = [];  // [{dataURL, mediaType, name}] pending for the next send
     this._provider = null;   // provider the conversation was started with
     this._busy = false;
     this._abort = null;
@@ -177,8 +180,34 @@ export class LLMChat {
     this._log.className = 'llm-chat-log';
     this._body.appendChild(this._log);
 
+    // Pending image attachments (thumbnails with a remove ✕)
+    this._attachRow = document.createElement('div');
+    this._attachRow.className = 'llm-chat-attach-row';
+    this._body.appendChild(this._attachRow);
+
     const inputRow = document.createElement('div');
     inputRow.className = 'llm-chat-input-row';
+
+    // Hidden file input + visible attach button
+    this._fileInput = document.createElement('input');
+    this._fileInput.type = 'file';
+    this._fileInput.accept = 'image/*';
+    this._fileInput.multiple = true;
+    this._fileInput.style.display = 'none';
+    this._fileInput.addEventListener('change', () => {
+      this._addAttachmentFiles(this._fileInput.files);
+      this._fileInput.value = '';
+    });
+    inputRow.appendChild(this._fileInput);
+
+    this._attachBtn = document.createElement('button');
+    this._attachBtn.className = 'llm-chat-attach-btn';
+    this._attachBtn.type = 'button';
+    // Icon is drawn in CSS (square + dot "lens") — font glyphs never center
+    this._attachBtn.title = 'Attach image — or paste / drag one in';
+    this._attachBtn.setAttribute('aria-label', 'Attach image');
+    this._attachBtn.addEventListener('click', () => this._fileInput.click());
+    inputRow.appendChild(this._attachBtn);
 
     this._input = document.createElement('textarea');
     this._input.className = 'llm-chat-input';
@@ -190,6 +219,14 @@ export class LLMChat {
         this._onSend();
       }
     });
+    // Pasted images become attachments (text pastes flow through untouched)
+    this._input.addEventListener('paste', (e) => {
+      const items = Array.from((e.clipboardData && e.clipboardData.items) || [])
+        .filter(i => i.kind === 'file' && i.type.startsWith('image/'));
+      if (!items.length) { return; }
+      e.preventDefault();
+      this._addAttachmentFiles(items.map(i => i.getAsFile()).filter(Boolean));
+    });
     inputRow.appendChild(this._input);
 
     this._sendBtn = document.createElement('button');
@@ -200,7 +237,80 @@ export class LLMChat {
     inputRow.appendChild(this._sendBtn);
 
     this._body.appendChild(inputRow);
+
+    // Drag-and-drop images onto the chat body. stopPropagation keeps the
+    // window-level drop handler (theme/STEP import) from also claiming them.
+    const dtHasImages = (dt) => dt && Array.from(dt.items || [])
+      .some(i => i.kind === 'file' && i.type.startsWith('image/'));
+    this._body.addEventListener('dragover', (e) => {
+      if (!dtHasImages(e.dataTransfer)) { return; }
+      e.preventDefault();
+      e.stopPropagation();
+      this._body.classList.add('llm-drop-hover');
+    });
+    this._body.addEventListener('dragleave', () => this._body.classList.remove('llm-drop-hover'));
+    this._body.addEventListener('drop', (e) => {
+      this._body.classList.remove('llm-drop-hover');
+      const files = Array.from((e.dataTransfer && e.dataTransfer.files) || [])
+        .filter(f => f.type.startsWith('image/'));
+      if (!files.length) { return; } // non-image drop: let the window handler have it
+      e.preventDefault();
+      e.stopPropagation();
+      this._addAttachmentFiles(files);
+    });
+
+    this._renderAttachRow();
     this._renderLog();
+  }
+
+  // ===== Image attachments =====
+
+  async _addAttachmentFiles(files) {
+    const images = Array.from(files || []).filter(f => f && f.type && f.type.startsWith('image/'));
+    for (const f of images) {
+      if (this._attachments.length >= MAX_ATTACHMENTS) {
+        this._setStatus('attachment limit (' + MAX_ATTACHMENTS + ') reached');
+        break;
+      }
+      try {
+        const raw = await readFileAsDataURL(f);
+        const dataURL = await normalizeAttachment(raw, ATTACH_MAX_DIM);
+        if (!dataURL) { throw new Error('unreadable image'); }
+        this._attachments.push({
+          dataURL,
+          mediaType: dataURL.slice(5, dataURL.indexOf(';')),
+          name: f.name || 'image',
+        });
+      } catch (e) {
+        this._setStatus('could not read ' + (f.name || 'image'));
+      }
+    }
+    this._renderAttachRow();
+  }
+
+  _renderAttachRow() {
+    if (!this._attachRow) { return; }
+    this._attachRow.innerHTML = '';
+    this._attachRow.style.display = this._attachments.length ? 'flex' : 'none';
+    this._attachments.forEach((a, i) => {
+      const chip = document.createElement('div');
+      chip.className = 'llm-chat-attach-chip';
+      const img = document.createElement('img');
+      img.src = a.dataURL;
+      img.title = a.name;
+      chip.appendChild(img);
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = '✕';
+      x.title = 'Remove ' + a.name;
+      x.addEventListener('click', () => {
+        this._attachments.splice(i, 1);
+        this._renderAttachRow();
+      });
+      chip.appendChild(x);
+      this._attachRow.appendChild(chip);
+    });
+    if (this._log) { this._log.scrollTop = this._log.scrollHeight; }
   }
 
   _renderLog() {
@@ -210,14 +320,20 @@ export class LLMChat {
       const div = document.createElement('div');
       div.className = 'llm-chat-msg llm-msg-' + entry.role;
       div.textContent = entry.text;
+      for (const url of entry.images || []) {
+        const img = document.createElement('img');
+        img.className = 'llm-chat-msg-img';
+        img.src = url;
+        div.appendChild(img);
+      }
       this._log.appendChild(div);
     }
     this._log.scrollTop = this._log.scrollHeight;
   }
 
-  _pushTranscript(role, text) {
-    if (!text) { return; }
-    this._transcript.push({ role, text });
+  _pushTranscript(role, text, images) {
+    if (!text && !(images && images.length)) { return; }
+    this._transcript.push({ role, text, images });
     this._renderLog();
   }
 
@@ -230,6 +346,7 @@ export class LLMChat {
       this._sendBtn.classList.toggle('llm-chat-stop', busy);
     }
     if (this._input) { this._input.disabled = busy; }
+    if (this._attachBtn) { this._attachBtn.disabled = busy; }
     if (!busy) { this._setStatus(''); }
   }
 
@@ -292,23 +409,26 @@ export class LLMChat {
     const conn = this._conn();
     if (!conn) { return; }
     const prompt = this._input.value.trim();
-    if (!prompt) { return; }
+    const atts = this._attachments.slice();
+    if (!prompt && !atts.length) { return; }
     if (!window.CascadeAPI || !window.CascadeAPI.isReady()) {
       this._setStatus('engine still loading…');
       return;
     }
 
     this._input.value = '';
-    this._pushTranscript('user', prompt);
+    this._attachments = [];
+    this._renderAttachRow();
+    this._pushTranscript('user', prompt, atts.map(a => a.dataURL));
     this._provider = conn.provider;
     this._abort = new AbortController();
     this._setBusy(true);
 
     try {
       if (conn.provider === 'anthropic') {
-        await this._runAnthropicLoop(conn, prompt);
+        await this._runAnthropicLoop(conn, prompt, atts);
       } else {
-        await this._runOpenRouterLoop(conn, prompt);
+        await this._runOpenRouterLoop(conn, prompt, atts);
       }
     } catch (e) {
       if (e.name === 'AbortError') {
@@ -328,8 +448,21 @@ export class LLMChat {
 
   // --- Anthropic Messages API ---
 
-  async _runAnthropicLoop(conn, prompt) {
-    this._apiMessages.push({ role: 'user', content: this._userTurnText(prompt) });
+  async _runAnthropicLoop(conn, prompt, atts = []) {
+    const text = this._userTurnText(prompt || 'See the attached image(s).');
+    this._apiMessages.push({
+      role: 'user',
+      content: atts.length
+        ? [
+            // Images lead, text follows — the layout Anthropic recommends
+            ...atts.map(a => ({
+              type: 'image',
+              source: { type: 'base64', media_type: a.mediaType, data: a.dataURL.split(',')[1] },
+            })),
+            { type: 'text', text },
+          ]
+        : text,
+    });
 
     for (let i = 0; i < MAX_LOOP_ITERATIONS; i++) {
       this._setStatus('thinking…');
@@ -393,11 +526,20 @@ export class LLMChat {
 
   // --- OpenRouter (OpenAI-style chat completions) ---
 
-  async _runOpenRouterLoop(conn, prompt) {
+  async _runOpenRouterLoop(conn, prompt, atts = []) {
     if (!this._apiMessages.length) {
       this._apiMessages.push({ role: 'system', content: buildSystemPrompt() });
     }
-    this._apiMessages.push({ role: 'user', content: this._userTurnText(prompt) });
+    const text = this._userTurnText(prompt || 'See the attached image(s).');
+    this._apiMessages.push({
+      role: 'user',
+      content: atts.length
+        ? [
+            { type: 'text', text },
+            ...atts.map(a => ({ type: 'image_url', image_url: { url: a.dataURL } })),
+          ]
+        : text,
+    });
 
     for (let i = 0; i < MAX_LOOP_ITERATIONS; i++) {
       this._setStatus('thinking…');
@@ -581,6 +723,8 @@ function buildSystemPrompt() {
     '- After a successful run, use capture_view to visually verify the geometry',
     '  before declaring success. Check proportions, placement, and orientation.',
     '- If a run reports errors, fix them and run again.',
+    '- Users may attach images (reference drawings, photos, screenshots). Infer',
+    '  geometry, proportions, and dimensions from them when present.',
     '- Keep chat replies brief: a sentence or two about what you built or changed.',
     '',
     'CascadeStudio API reference:',
@@ -599,6 +743,37 @@ async function extractApiError(resp) {
     detail = (body.error && (body.error.message || body.error.type)) || JSON.stringify(body);
   } catch (e) { /* non-JSON body */ }
   return 'HTTP ' + resp.status + (detail ? ' — ' + truncate(detail, 300) : '');
+}
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('read failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Prepare a user-attached image for the API: downscale to maxDim and
+ *  re-encode any format the providers don't accept (BMP, TIFF, …) — JPEG
+ *  stays JPEG so photos don't balloon into PNGs. Resolves null on failure. */
+function normalizeAttachment(dataURL, maxDim) {
+  return new Promise((resolve) => {
+    const srcType = dataURL.slice(5, dataURL.indexOf(';'));
+    const supported = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(srcType);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      if (supported && scale >= 1) { resolve(dataURL); return; }
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL(srcType === 'image/jpeg' ? 'image/jpeg' : 'image/png', 0.9));
+    };
+    img.onerror = () => resolve(supported ? dataURL : null);
+    img.src = dataURL;
+  });
 }
 
 /** Downscale a dataURL image so screenshots don't blow up token usage. */

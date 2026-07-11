@@ -484,7 +484,8 @@ body {
   color: white;
   border: none;
   border-radius: 4px;
-  padding: 6px 14px;
+  height: 28px;
+  padding: 0 14px;
   font-size: 12px;
   font-family: var(--cs-font-ui);
   cursor: pointer;
@@ -501,6 +502,113 @@ body {
 
 .llm-chat-send.llm-chat-stop:hover {
   background: #c96a6a;
+}
+
+/* Image attachments: ⊕ button, pending-chip row, transcript thumbnails */
+
+.llm-chat-attach-btn {
+  background: var(--cs-bg-surface);
+  color: var(--cs-text-primary);
+  border: 1px solid var(--cs-border);
+  border-radius: 4px;
+  /* Same 28px as the input's min-height and the Send button — the row
+     aligns flex-end, so a shorter button reads as sunken */
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+/* The icon: a camera-lens mark (square outline + centered dot) drawn in
+   CSS so it centers exactly — font glyphs sit off-center in the em box */
+.llm-chat-attach-btn::before {
+  content: '';
+  display: block;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-radius: 2.5px;
+}
+
+.llm-chat-attach-btn::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.llm-chat-attach-btn:hover:not(:disabled) {
+  border-color: var(--cs-accent);
+  color: var(--cs-accent);
+}
+
+.llm-chat-attach-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.llm-chat-attach-row {
+  display: none;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 8px 0;
+}
+
+.llm-chat-attach-chip {
+  position: relative;
+}
+
+.llm-chat-attach-chip img {
+  display: block;
+  height: 44px;
+  max-width: 90px;
+  object-fit: cover;
+  border: 1px solid var(--cs-border);
+  border-radius: 4px;
+}
+
+.llm-chat-attach-chip button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--cs-bg-elevated);
+  color: var(--cs-text-primary);
+  font-size: 10px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.llm-chat-attach-chip button:hover {
+  background: #b05555;
+  color: white;
+}
+
+.llm-chat-msg-img {
+  display: block;
+  max-height: 80px;
+  max-width: 100%;
+  border-radius: 4px;
+  margin-top: 4px;
+}
+
+.llm-chat-body.llm-drop-hover {
+  outline: 1px dashed var(--cs-accent);
+  outline-offset: -2px;
 }
 
 /* ============================================================
