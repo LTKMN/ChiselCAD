@@ -169,17 +169,14 @@ fs.writeFileSync(path.join(distDir, 'index.html'), `<!DOCTYPE html>
                 <details id="fileMenu" class="topnav-menu">
                     <summary>File ▾</summary>
                     <div class="topnav-menu-items">
+                        <a href="#" title="Start a fresh, blank model" onmouseup="window.newProject();">New Model</a>
+                        <div class="topnav-menu-sep"></div>
                         <a href="#" title="Save Project to .json" onmouseup="window.saveProject();">Save Project…</a>
                         <a href="#" title="Load Project from .json" onmouseup="window.loadProject();">Load Project…</a>
                         <div class="topnav-menu-sep"></div>
                         <a href="#" title="Export the model as STEP" onmouseup="window.threejsViewport?.saveShapeSTEP();">Export STEP</a>
                         <a href="#" title="Export the model as STL" onmouseup="window.threejsViewport?.saveShapeSTL();">Export STL</a>
                         <a href="#" title="Export the model as OBJ" onmouseup="window.threejsViewport?.saveShapeOBJ();">Export OBJ</a>
-                        <div class="topnav-menu-sep"></div>
-                        <label for="files" title="Import STEP, IGES, or (ASCII) STL from File">Import STEP/IGES/STL…
-                            <input id="files" name="files" type="file" accept=".iges,.step,.igs,.stp,.stl" multiple style="display:none;" oninput="window.loadFiles();"/>
-                        </label>
-                        <a href="#" title="Clears the external step/iges/stl files stored in the project." onmouseup="window.clearExternalFiles();">Clear Imported</a>
                         <div class="topnav-menu-sep"></div>
                         <label for="blenderTheme" title="Restyle the app from a Blender interface theme (.xml) — or just drag one onto the window">Import Blender Theme…
                             <input id="blenderTheme" name="blenderTheme" type="file" accept=".xml" style="display:none;" oninput="window.loadBlenderTheme();"/>

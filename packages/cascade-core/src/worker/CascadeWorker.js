@@ -273,7 +273,9 @@ class CascadeStudioWorker {
       postMessage({ "type": "Progress", "payload": { "opNumber": self.opNumber, "opType": "" } });
       return [facesAndEdges, payload.sceneOptions, shapeRanges, self.scenePlanes || []];
     } else {
-      console.error("There were no scene shapes returned!");
+      // An empty scene is legitimate (e.g. File > New Model) — worth a note
+      // in the console, but not a thrown error like console.error causes.
+      console.log("Scene is empty — no shapes were created.");
     }
     postMessage({ "type": "Progress", "payload": { "opNumber": self.opNumber, "opType": "" } });
     // No mesh, but still a real response: construction planes (and an empty

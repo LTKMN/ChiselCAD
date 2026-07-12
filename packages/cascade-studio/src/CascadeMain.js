@@ -89,6 +89,7 @@ class CascadeStudioApp {
 
     // Backward compatibility: expose functions to window for inline HTML event handlers
     window.cascadeApp = this;
+    window.newProject = () => this.newProject();
     window.saveProject = () => this.saveProject();
     window.loadProject = () => this.loadProject();
     window.loadFiles = (id) => this.loadFiles(id);
@@ -487,6 +488,35 @@ class CascadeStudioApp {
     };
   }
 
+  /** Start a fresh, blank model — clears the code, GUI state, imported
+   *  files, and the current file handle. */
+  newProject() {
+    if (window.workerWorking) { return; }
+
+    // Warn before wiping unsaved work (untouched starter code doesn't count)
+    const current = this.editor.getCode();
+    const pristine = this.file.handle
+      ? current === this.file.content
+      : [CascadeStudioApp.STARTER_CODE, CascadeStudioApp.OPENSCAD_STARTER_CODE,
+         CascadeStudioApp.NEW_MODEL_CODE, CascadeStudioApp.OPENSCAD_NEW_MODEL_CODE
+        ].includes(current);
+    if (!pristine && !confirm("Start a new model? Unsaved changes will be lost.")) { return; }
+
+    this.file = {};
+    this._savedCode = {};
+    window.history.replaceState({}, 'Cascade Studio', '?');
+    this.clearExternalFiles();
+    this.gui.state = {};
+
+    const blank = this.editor.mode === 'openscad'
+      ? CascadeStudioApp.OPENSCAD_NEW_MODEL_CODE
+      : CascadeStudioApp.NEW_MODEL_CODE;
+    this.editor.setCode(blank);
+    this.editor.container.setTitle('* Untitled');
+    if (this.viewport) { this.viewport._fitOnNextRender = true; }
+    this.editor.evaluateCode();
+  }
+
   /** Serialize the project's current state into a .json file and save it. */
   async saveProject() {
     let currentCode = this.editor.getCode();
@@ -646,6 +676,19 @@ class CascadeStudioApp {
     );
   }
 }
+
+/** Blank-model boilerplate used by File > New Model. */
+CascadeStudioApp.NEW_MODEL_CODE =
+`// New model
+Translate([-10, -10, 0], Box(20, 20, 20));
+`;
+
+/** Blank-model boilerplate for OpenSCAD mode. */
+CascadeStudioApp.OPENSCAD_NEW_MODEL_CODE =
+`// New model
+translate([-10, -10, 0])
+  cube([20, 20, 20]);
+`;
 
 /** Default starter code shown in the editor. */
 CascadeStudioApp.STARTER_CODE =
