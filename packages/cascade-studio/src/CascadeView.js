@@ -242,6 +242,7 @@ class CascadeEnvironment {
     // Headless tests render via swiftshader — a continuously-animating
     // spinner burns a CPU core per worker and starves the WASM compile
     if (navigator.webdriver) { return; }
+    this._spinnerLoading = true;
     new GLTFLoader().load('./icon/gyroscope.glb', (gltf) => {
       if (this._spinnerDismissed) { return; }
       const model = gltf.scene;
@@ -273,6 +274,7 @@ class CascadeEnvironment {
   }
 
   _mountSpinner(model, scale) {
+    this._spinnerLoading = false;
     const group = new THREE.Group();
     group.name = "Loading Spinner";
     group.add(model);
@@ -283,10 +285,29 @@ class CascadeEnvironment {
     this.environment.viewDirty = true;
   }
 
+  /** Re-arm the loading gyroscope after startup (e.g. File > New Model):
+   *  hide the current model and tumble until the next real mesh render
+   *  (or an engine error) dismisses it. */
+  showLoadingSpinner() {
+    if (this._spinner || this._spinnerLoading || navigator.webdriver) { return; }
+    if (this.mainObject) {
+      this.mainObject.visible = false;
+      this._spinnerHidMain = true;
+    }
+    this._spinnerDismissed = false;
+    this._createLoadingSpinner();
+    this.environment.viewDirty = true;
+  }
+
   /** Remove the loading spinner, if it's still up (idempotent). The flag
    *  also stops a glb that finishes loading after dismissal from mounting. */
   dismissLoadingSpinner() {
     this._spinnerDismissed = true;
+    this._spinnerLoading = false;
+    if (this._spinnerHidMain) {
+      this._spinnerHidMain = false;
+      if (this.mainObject) { this.mainObject.visible = true; }
+    }
     if (!this._spinner) { return; }
     this.environment.scene.remove(this._spinner);
     this._spinner.traverse((o) => {
@@ -294,6 +315,34 @@ class CascadeEnvironment {
       if (o.material) { o.material.dispose(); }
     });
     this._spinner = this._spinnerMain = this._spinnerSub = null;
+    this.environment.viewDirty = true;
+  }
+
+  /** A clean evaluation produced zero shapes: take the old model down so the
+   *  viewport actually reads as empty. (A null mesh never reaches
+   *  renderMeshData, so deleting all the code would otherwise leave the last
+   *  model on screen.) Only call on evalOk results — an eval that THREW also
+   *  returns a null mesh, and errors should keep the old model up. */
+  renderEmptyScene() {
+    this.dismissLoadingSpinner();
+    window.workerWorking = false;
+    this._shapeRanges = [];
+    this._lastMeshSig = '';
+    this._lineHighlightCache = {};
+    this._highlightedLine = null;
+    this._clearLineHighlight();
+    this.clearPickHighlights();
+    this._finalMeshData = null;
+    this._historyCurrentStep = -1;
+    if (this._historyObject) {
+      this.environment.scene.remove(this._historyObject);
+      this._historyObject = null;
+    }
+    if (this.mainObject) {
+      this.environment.scene.remove(this.mainObject);
+      this.mainObject = null;
+    }
+    this._pendingShake = 0;
     this.environment.viewDirty = true;
   }
 

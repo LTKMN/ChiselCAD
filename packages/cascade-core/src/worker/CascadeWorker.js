@@ -180,9 +180,15 @@ class CascadeStudioWorker {
     this.standardLibrary.utils.modelHistory = self.modelHistory;
     this.standardLibrary.utils._pendingHistoryOp = null;
 
+    // Success flag rides along in the combineAndRenderShapes response so the
+    // main thread can tell "clean eval, zero shapes" (clear the viewport)
+    // from "eval threw before making shapes" (keep the old model up) — the
+    // async error event can land after the mesh response, so it can't gate this.
+    self.lastEvalOk = true;
     try {
       eval(payload.code);
     } catch (e) {
+      self.lastEvalOk = false;
       setTimeout(() => {
         e.message = "Line " + self.currentLineNumber + ": " + self.currentOp + "() encountered  " + e.message;
         throw e;
@@ -271,7 +277,7 @@ class CascadeStudioWorker {
       // sceneShapes intentionally NOT cleared: the background refine pass
       // re-meshes the same shapes at finer resolution. evaluate() resets it.
       postMessage({ "type": "Progress", "payload": { "opNumber": self.opNumber, "opType": "" } });
-      return [facesAndEdges, payload.sceneOptions, shapeRanges, self.scenePlanes || []];
+      return [facesAndEdges, payload.sceneOptions, shapeRanges, self.scenePlanes || [], self.lastEvalOk !== false];
     } else {
       // An empty scene is legitimate (e.g. File > New Model) — worth a note
       // in the console, but not a thrown error like console.error causes.
@@ -280,7 +286,7 @@ class CascadeStudioWorker {
     postMessage({ "type": "Progress", "payload": { "opNumber": self.opNumber, "opType": "" } });
     // No mesh, but still a real response: construction planes (and an empty
     // scene) must reach the main thread instead of stalling the request
-    return [null, payload.sceneOptions, [], self.scenePlanes || []];
+    return [null, payload.sceneOptions, [], self.scenePlanes || [], self.lastEvalOk !== false];
   }
 
   /** Triangulate and return the shapes from a specific modeling history step.

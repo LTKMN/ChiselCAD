@@ -81,14 +81,17 @@ class CascadeEngine {
 
     this._working = false;
 
-    if (!result) return { meshData: null, sceneOptions: {}, shapeRanges: [], scenePlanes: [] };
+    if (!result) return { meshData: null, sceneOptions: {}, shapeRanges: [], scenePlanes: [], evalOk: false };
 
-    const [facesAndEdges, resultSceneOptions, shapeRanges, scenePlanes] = result;
+    const [facesAndEdges, resultSceneOptions, shapeRanges, scenePlanes, evalOk] = result;
     return {
       meshData: facesAndEdges ? { faces: facesAndEdges[0], edges: facesAndEdges[1] } : null,
       sceneOptions: resultSceneOptions || {},
       shapeRanges: shapeRanges || [],
-      scenePlanes: scenePlanes || []
+      scenePlanes: scenePlanes || [],
+      // True when the evaluation ran to completion — a null meshData with
+      // evalOk means the code legitimately produced zero shapes
+      evalOk: evalOk !== false
     };
   }
 

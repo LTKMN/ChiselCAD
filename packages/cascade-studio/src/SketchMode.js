@@ -819,6 +819,31 @@ class SketchMode {
     return base + (max + 1);
   }
 
+  /** A bare, unassigned statement (e.g. `Translate(..., Box(...));`) can't be
+   *  referenced by emitted feature code — prefix it with `let solidN = ` so
+   *  pick flows work on unnamed shapes too. Returns the new name, or null
+   *  when the defining line isn't safely the start of a bare statement. */
+  _autoNameShape(model, info) {
+    const line = info.definingLine;
+    const text = model.getLineContent(line);
+    const call = text.match(/^(\s*)(?:new\s+)?([A-Za-z_$][\w$]*)\s*[(.]/);
+    if (!call || /^(?:if|for|while|switch|return|function)$/.test(call[2])) { return null; }
+    // Reject continuation lines: the nearest code line above must have ended
+    // its statement (`;`, `{`, or `}`, comments allowed after)
+    for (let ln = line - 1; ln >= 1; ln--) {
+      const t = model.getLineContent(ln).trim();
+      if (t === '' || t.startsWith('//')) { continue; }
+      if (!/[;{}]\s*(?:\/\/.*)?$/.test(t)) { return null; }
+      break;
+    }
+    const name = this._nextVarName(this._app.editor.getCode(), info.sketch ? 'sketch' : 'solid');
+    this._app.editor.editor.executeEdits('chisel-auto-name', [{
+      range: new monaco.Range(line, call[1].length + 1, line, call[1].length + 1),
+      text: `let ${name} = `,
+    }]);
+    return name;
+  }
+
   /** Extrude argument for a sketch on this plane. Baked face planes use a
    *  scalar (extrudes along the face normal); cardinal planes use a vector
    *  toward the side the sketch was drawn from. */
@@ -1014,6 +1039,11 @@ class SketchMode {
         const g = t.match(/^\s*(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\[\s*(?:\/\/[^\n]*)?$/);
         if (g) { m = g; break; }
       }
+    }
+    if (!m) {
+      // Unnamed shape: name it on the spot so the pick can proceed
+      const autoName = this._autoNameShape(model, info);
+      if (autoName) { m = [null, autoName]; }
     }
     if (!m) {
       this._flashHint(`That shape isn't assigned to a variable (line ${info.definingLine}) — give it a name first`);

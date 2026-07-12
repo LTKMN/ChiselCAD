@@ -424,6 +424,107 @@ class CascadeStudioApp {
     window.addEventListener('resize', this._updateLayoutSize);
     window.addEventListener('orientationchange', this._updateLayoutSize);
     requestAnimationFrame(this._updateLayoutSize);
+
+    this._setupReopenTabs(isMobile);
+  }
+
+  /** Slim edge carets that reopen closed panels — closing a dockview tab
+   *  otherwise leaves no way to get it back. One per panel, shown only
+   *  while that panel is missing. */
+  _setupReopenTabs(isMobile) {
+    const appBody = document.getElementById('appbody');
+    appBody.style.position = 'relative';
+
+    const defs = {
+      codeEditor:  { label: '▸', title: 'Reopen code editor', cls: 'cs-reopen-left' },
+      console:     { label: '▴', title: 'Reopen console',     cls: 'cs-reopen-bottom' },
+      cascadeView: { label: '◂', title: 'Reopen 3D view',     cls: 'cs-reopen-right' },
+    };
+    this._reopenTabs = {};
+    for (const id in defs) {
+      const btn = document.createElement('button');
+      btn.className = 'cs-reopen-tab ' + defs[id].cls;
+      btn.textContent = defs[id].label;
+      btn.title = defs[id].title;
+      btn.style.display = 'none';
+      btn.onclick = () => this._reopenPanel(id, isMobile);
+      appBody.appendChild(btn);
+      this._reopenTabs[id] = btn;
+    }
+
+    const update = () => {
+      for (const id in this._reopenTabs) {
+        this._reopenTabs[id].style.display = this._dockviewApi.getPanel(id) ? 'none' : '';
+      }
+      // The console caret hugs the left edge of the region the console
+      // occupied (below the 3D view, where its tab's X was) — parked at the
+      // appbody corner it lands on the AI chat strip in the editor panel.
+      const btn = this._reopenTabs.console;
+      if (btn.style.display !== 'none') {
+        let left = 24;
+        const view = this._dockviewApi.getPanel('cascadeView');
+        if (view && view.group && view.group.element) {
+          const g = view.group.element.getBoundingClientRect();
+          const b = appBody.getBoundingClientRect();
+          left = Math.max(8, g.left - b.left + 8);
+        }
+        btn.style.left = left + 'px';
+      }
+    };
+    this._dockviewApi.onDidRemovePanel(update);
+    this._dockviewApi.onDidAddPanel(update);
+    // Re-anchor on splitter drags and window resizes too
+    this._dockviewApi.onDidLayoutChange(update);
+    update();
+  }
+
+  /** Re-add a closed panel next to whichever of its neighbors still exists,
+   *  restoring the original proportions. The code editor reopens with the
+   *  current code (Monaco survives panel removal until the next initPanel). */
+  _reopenPanel(id, isMobile) {
+    if (this._dockviewApi.getPanel(id)) { return; }
+    const appBody = document.getElementById('appbody');
+    const anchor = (...ids) => ids.find(i => this._dockviewApi.getPanel(i));
+
+    if (id === 'codeEditor') {
+      const next = anchor('cascadeView', 'console');
+      const panel = this._dockviewApi.addPanel({
+        id: 'codeEditor', component: 'codeEditor',
+        title: this.file.handle ? this.file.handle.name : '* Untitled',
+        params: { code: this.editor.getCode() || CascadeStudioApp.STARTER_CODE },
+        position: next ? { referencePanel: next, direction: isMobile ? 'above' : 'left' } : undefined,
+      });
+      if (!isMobile && next) {
+        this._applyPanelSizes(() => {
+          const w = appBody.offsetWidth;
+          panel.group.api.setSize({ width: Math.floor(w * 0.3) });
+          return Math.abs(panel.group.width - w * 0.3) < 40;
+        });
+      }
+    } else if (id === 'console') {
+      const next = anchor(isMobile ? 'codeEditor' : 'cascadeView', isMobile ? 'cascadeView' : 'codeEditor');
+      const panel = this._dockviewApi.addPanel({
+        id: 'console', component: 'console', title: 'Console',
+        position: next ? { referencePanel: next, direction: 'below' } : undefined,
+      });
+      if (next) {
+        const frac = isMobile ? 0.05 : 0.15;
+        this._applyPanelSizes(() => {
+          const h = appBody.offsetHeight;
+          panel.group.api.setSize({ height: Math.floor(h * frac) });
+          return Math.abs(panel.group.height - h * frac) < 40;
+        });
+      }
+    } else if (id === 'cascadeView') {
+      const next = anchor('codeEditor', 'console');
+      this._dockviewApi.addPanel({
+        id: 'cascadeView', component: 'cascadeView', title: 'CAD View',
+        params: { guiState: this.gui.state },
+        position: next
+          ? { referencePanel: next, direction: next === 'console' ? 'above' : (isMobile ? 'above' : 'right') }
+          : undefined,
+      });
+    }
   }
 
   /** Apply initial panel proportions, retrying until dockview accepts them.
@@ -513,7 +614,10 @@ class CascadeStudioApp {
       : CascadeStudioApp.NEW_MODEL_CODE;
     this.editor.setCode(blank);
     this.editor.container.setTitle('* Untitled');
-    if (this.viewport) { this.viewport._fitOnNextRender = true; }
+    if (this.viewport) {
+      this.viewport.showLoadingSpinner();  // gyroscope until the cube lands
+      this.viewport._fitOnNextRender = true;
+    }
     this.editor.evaluateCode();
   }
 
@@ -680,7 +784,7 @@ class CascadeStudioApp {
 /** Blank-model boilerplate used by File > New Model. */
 CascadeStudioApp.NEW_MODEL_CODE =
 `// New model
-Translate([-10, -10, 0], Box(20, 20, 20));
+let cube = Translate([-10, -10, 0], Box(20, 20, 20));
 `;
 
 /** Blank-model boilerplate for OpenSCAD mode. */

@@ -507,6 +507,10 @@ class EditorManager {
           this._app.viewport.renderMeshData(result.meshData, result.sceneOptions, result.shapeRanges);
           this._lastMeshedRes = draft ? EditorManager.DRAFT_RES : EditorManager.REST_RES;
           this._scheduleRefine(performance.now() - evalStart);
+        } else if (result.evalOk) {
+          // Clean eval, zero shapes (e.g. all code deleted) — show it as empty.
+          // Errored evals keep the previous model on screen.
+          this._app.viewport.renderEmptyScene();
         }
       }
     }).catch((err) => {

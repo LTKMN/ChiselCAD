@@ -1082,3 +1082,42 @@ body {
   72%  { opacity: 1; }
   100% { opacity: 0; transform: translate(-50%, -100%) translateY(-48px); }
 }
+
+/* Edge carets that reopen closed dockview panels (CascadeMain._setupReopenTabs) */
+.cs-reopen-tab {
+  position: absolute;
+  z-index: 40;
+  background: var(--cs-bg-elevated);
+  color: var(--cs-text-secondary);
+  border: 1px solid var(--cs-border);
+  font-family: var(--cs-font-ui);
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  transition: color var(--cs-transition), border-color var(--cs-transition);
+}
+.cs-reopen-tab:hover {
+  color: var(--cs-accent);
+  border-color: var(--cs-border-active);
+}
+.cs-reopen-left {
+  left: 0; top: 50%;
+  transform: translateY(-50%);
+  width: 16px; height: 56px;
+  border-left: none;
+  border-radius: 0 var(--cs-radius) var(--cs-radius) 0;
+}
+.cs-reopen-right {
+  right: 0; top: 50%;
+  transform: translateY(-50%);
+  width: 16px; height: 56px;
+  border-right: none;
+  border-radius: var(--cs-radius) 0 0 var(--cs-radius);
+}
+.cs-reopen-bottom {
+  bottom: 0; left: 24px; /* left is re-anchored by _setupReopenTabs */
+  height: 16px; width: 56px;
+  border-bottom: none;
+  border-radius: var(--cs-radius) var(--cs-radius) 0 0;
+}
