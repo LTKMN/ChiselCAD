@@ -77,8 +77,8 @@ const TOOLS = [
 // shortcuts L/R/C/T/D).
 const RELATIONS = [
   { id: 'anchor',     icon: '⚓', label: 'Anchor',     key: 'a', hint: 'Pin the selected point in place (or an element to pin its points). Click again to un-pin' },
-  { id: 'horizontal', icon: '━', label: 'Horiz',      key: 'h', hint: 'Make the selected line(s) horizontal' },
-  { id: 'vertical',   icon: '┃', label: 'Vert',       key: 'v', hint: 'Make the selected line(s) vertical' },
+  { id: 'horizontal', icon: '━', label: 'Horiz',      key: 'h', hint: 'Make the selected line(s) horizontal — or align two circle/arc centers side by side' },
+  { id: 'vertical',   icon: '┃', label: 'Vert',       key: 'v', hint: 'Make the selected line(s) vertical — or align two circle/arc centers one above the other' },
   { id: 'parallel',   icon: '∥', label: 'Parallel',   key: 'p', hint: 'Make two selected lines parallel' },
   { id: 'perp',       icon: '⊥', label: 'Perp',       key: 'x', hint: 'Make two selected lines perpendicular' },
   { id: 'equal',      icon: '＝', label: 'Equal',      key: 'e', hint: 'Equal length (two lines) or equal radius (two circles/arcs)' },
@@ -768,6 +768,12 @@ class SketchMode {
       if (ent) { pt = this._entGlyphPos(ent).base; }
     }
     if (!pt) { return null; }
+    return this._sketchToClient(pt);
+  }
+
+  /** Sketch-plane point → client (screen) coordinates. */
+  _sketchToClient(pt) {
+    const env = this._env;
     const v = this._def.toThree(pt[0], pt[1]).project(env.camera);
     const rect = env.renderer.domElement.getBoundingClientRect();
     return [
@@ -1185,6 +1191,9 @@ class SketchMode {
     this._rectStart = null;
     this._circleCenter = null;
     this._hoverTrim = null;
+    // Switching to Dimension with entities already selected dimensions the
+    // selection directly (two → distance between them; one → length/radius)
+    const dimSel = id === 'dim' ? this._sel.filter(s => s.kind === 'ent').map(s => s.id) : [];
     this._sel = [];
     this._dragCand = null;
     this._closeDimBox();
@@ -1194,6 +1203,7 @@ class SketchMode {
     }
     const t = TOOLS.find(t => t.id === id);
     this._setHint(t ? t.hint : '');
+    if (dimSel.length) { this._openDimForSelection(dimSel); }
     this._renderPreview();
     this._renderEntities();
   }
@@ -1510,7 +1520,12 @@ class SketchMode {
   _hvConflict(c) {
     if (c.type !== 'horizontal' && c.type !== 'vertical') { return false; }
     const other = c.type === 'horizontal' ? 'vertical' : 'horizontal';
-    return this.constraints.some(k => k.type === other && k.entId === c.entId);
+    if (c.entId !== undefined) {
+      return this.constraints.some(k => k.type === other && k.entId === c.entId);
+    }
+    // Pair form (aligned centers): H + V on the same pair means concentric
+    return this.constraints.some(k => k.type === other && k.entId === undefined &&
+      ((k.aId === c.aId && k.bId === c.bId) || (k.aId === c.bId && k.bId === c.aId)));
   }
 
   _findConstraint(c) {
@@ -1589,10 +1604,15 @@ class SketchMode {
       }
     } else if (id === 'horizontal' || id === 'vertical') {
       const own = lines.filter(l => !l.ref);
-      if (!own.length) {
-        return need(lines.length ? 'That is reference geometry — it can\'t be constrained directly' : 'Select a line first');
+      if (circs.length === 2 && !lines.length) {
+        // Two circles/arcs → align their centers (pair form: aId/bId)
+        toAdd.push({ type: id, aId: circs[0].id, bId: circs[1].id });
+      } else if (!own.length) {
+        return need(lines.length ? 'That is reference geometry — it can\'t be constrained directly'
+          : 'Select a line — or two circles/arcs to align their centers');
+      } else {
+        for (const l of own) { toAdd.push({ type: id, entId: l.id }); }
       }
-      for (const l of own) { toAdd.push({ type: id, entId: l.id }); }
     } else if (id === 'parallel' || id === 'perp') {
       if (lines.length !== 2) { return need((id === 'perp' ? 'Perpendicular' : 'Parallel') + ' needs two lines — Shift-click the second one'); }
       toAdd.push({ type: id, aId: lines[0].id, bId: lines[1].id });
@@ -1624,7 +1644,10 @@ class SketchMode {
       if (!fresh.length) { return need('Already related'); }
       const conflict = fresh.find(c => this._hvConflict(c));
       if (conflict) {
-        return need('That line is already ' + (conflict.type === 'horizontal' ? 'vertical' : 'horizontal') + ' — delete that relation first');
+        const existing = conflict.type === 'horizontal' ? 'vertical' : 'horizontal';
+        return need(conflict.entId !== undefined
+          ? 'That line is already ' + existing + ' — delete that relation first'
+          : 'Those centers are already aligned ' + (existing === 'vertical' ? 'vertically' : 'horizontally') + ' — use Concentric to do both');
       }
       const hadBad = this.constraints.some(k => k.unsat);
       this._pushUndo();
@@ -1803,6 +1826,18 @@ class SketchMode {
       case 'anchor': return; // enforced by the locked set
       case 'horizontal':
       case 'vertical': {
+        if (c.entId === undefined) {
+          // Pair form: align two circle/arc centers on the axis
+          const A = this._ent(c.aId), B = this._ent(c.bId);
+          if (!A || !B || !A.c || !B.c) { return; }
+          const ax = c.type === 'horizontal' ? 1 : 0; // horizontal = equal Y
+          const wa = w(A.c), wb = w(B.c), tot = wa + wb;
+          if (!tot) { return; }
+          const err = B.c[ax] - A.c[ax];
+          A.c[ax] += err * wa / tot;
+          B.c[ax] -= err * wb / tot;
+          return;
+        }
         const e = this._ent(c.entId);
         if (!e) { return; }
         const target = c.type === 'horizontal' ? 0 : Math.PI / 2;
@@ -1917,8 +1952,12 @@ class SketchMode {
     const B = c.bId !== undefined ? this._ent(c.bId) : null;
     switch (c.type) {
       case 'anchor': { const p = this._ptById(c.ptId); return p ? dist2(p, c.at) : 0; }
-      case 'horizontal': return e1 ? Math.abs(e1.b[1] - e1.a[1]) : 0;
-      case 'vertical': return e1 ? Math.abs(e1.b[0] - e1.a[0]) : 0;
+      case 'horizontal':
+        return e1 ? Math.abs(e1.b[1] - e1.a[1])
+          : (A && B && A.c && B.c ? Math.abs(B.c[1] - A.c[1]) : 0);
+      case 'vertical':
+        return e1 ? Math.abs(e1.b[0] - e1.a[0])
+          : (A && B && A.c && B.c ? Math.abs(B.c[0] - A.c[0]) : 0);
       case 'parallel':
       case 'perp': {
         if (!A || !B) { return 0; }
@@ -2671,6 +2710,8 @@ class SketchMode {
       const info = this._dimInfo(this._dim.aId, this._dim.bId);
       if (info) {
         this._dim.info = info;
+        this._dim.kindEl.textContent = '↔';
+        this._dim.kindEl.title = 'distance between the two elements';
         this._dim.input.value = fmt(info.value);
         this._dim.input.focus();
         this._dim.input.select();
@@ -2694,6 +2735,35 @@ class SketchMode {
     const prefill = con && con.varName ? con.varName + '=' + fmt(con.value) : undefined;
     this._openDimBox(e, hit.ent.id, info, prefill);
     this._renderEntities();
+  }
+
+  /** Open the dimension box for entities that were selected BEFORE switching
+   *  to the Dimension tool (Select → D). Two entities → distance between
+   *  them, same as clicking them in sequence; one → its length/radius. */
+  _openDimForSelection(ids) {
+    let aId = ids[0], bId = ids.length > 1 ? ids[1] : null;
+    let A = this._ent(aId), B = bId !== null ? this._ent(bId) : null;
+    // A reference edge can only be the SECOND element (its own size is fixed)
+    if (A && A.ref && B && !B.ref) { [aId, bId] = [bId, aId]; [A, B] = [B, A]; }
+    if (!A || A.ref) {
+      this._floatMsg('reference — pair it with a sketch element to dimension against it', 'info');
+      return;
+    }
+    const info = this._dimInfo(aId, bId);
+    if (!info) { return; }
+    // An existing dimension between/on the selection re-opens for editing
+    let con;
+    if (bId === null) {
+      const type = info.kind === 'length' ? 'length' : 'radius';
+      con = this.constraints.find(k => k.type === type && k.entId === aId);
+    } else {
+      con = this._findConstraint({ type: 'dist', aId, bId });
+    }
+    const prefill = con && con.varName ? con.varName + '=' + fmt(con.value) : undefined;
+    const anchor = (e) => e.type === 'line' ? lerp2(e.a, e.b, 0.5) : e.c;
+    const mid = B ? lerp2(anchor(A), anchor(B), 0.5) : anchor(A);
+    const [cx, cy] = this._sketchToClient(mid);
+    this._openDimBox({ clientX: cx, clientY: cy }, aId, info, prefill);
   }
 
   /** Compute the current value (and how to apply a new one) for a dimension. */
@@ -2782,7 +2852,8 @@ class SketchMode {
 
     const kind = document.createElement('span');
     kind.className = 'cs-dim-kind';
-    kind.textContent = info.kind === 'radius' ? 'R' : (info.kind === 'length' ? 'L' : 'D');
+    kind.textContent = info.kind === 'radius' ? 'R' : (info.kind === 'length' ? 'L' : '↔');
+    kind.title = info.kind === 'radius' ? 'radius' : (info.kind === 'length' ? 'length' : 'distance between the two elements');
     box.appendChild(kind);
 
     const input = document.createElement('input');
@@ -2792,7 +2863,7 @@ class SketchMode {
     box.appendChild(input);
     panel.appendChild(box);
 
-    this._dim = { aId, bId: info.bId !== undefined ? info.bId : null, box, input, info };
+    this._dim = { aId, bId: info.bId !== undefined ? info.bId : null, box, input, info, kindEl: kind };
 
     input.addEventListener('keydown', (ev) => {
       ev.stopPropagation();
@@ -2893,7 +2964,11 @@ class SketchMode {
       ctx.font = font;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = 'rgba(17, 17, 17, 0.65)';
+      // Chip background flips light/dark to guarantee contrast with the text
+      // color (theme imports can hand us anything, including dark blues)
+      const tc = new THREE.Color(color);
+      const lum = 0.299 * tc.r + 0.587 * tc.g + 0.114 * tc.b;
+      ctx.fillStyle = lum < 0.5 ? 'rgba(240, 240, 240, 0.85)' : 'rgba(17, 17, 17, 0.65)';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = color;
       ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 1);
@@ -2908,6 +2983,47 @@ class SketchMode {
     spr.userData.aspect = entry.aspect;
     spr.renderOrder = 999;
     return spr;
+  }
+
+  /** Witness endpoints (p1 → p2) for a distance dimension — the two points
+   *  the measure actually runs between, matching _pairDistGeom's modes. */
+  _distWitness(A, B, mode) {
+    const mid = (e) => e.type === 'line' ? lerp2(e.a, e.b, 0.5) : e.c;
+    const foot = (p, ln) => {
+      const u = sub2(ln.b, ln.a), L2 = dot2(u, u);
+      if (L2 < 1e-12) { return null; }
+      const t = dot2(sub2(p, ln.a), u) / L2;
+      return [ln.a[0] + u[0] * t, ln.a[1] + u[1] * t];
+    };
+    if (mode === 'perp') {
+      if (A.type === 'line' && B.type === 'line') {
+        const p1 = mid(A), p2 = foot(p1, B);
+        return p2 ? { p1, p2 } : null;
+      }
+      const ln = A.type === 'line' ? A : (B.type === 'line' ? B : null);
+      const ci = A.type !== 'line' ? A : (B.type !== 'line' ? B : null);
+      if (ln && ci) {
+        const p2 = foot(ci.c, ln);
+        return p2 ? { p1: ci.c, p2 } : null;
+      }
+    }
+    const p1 = mid(A), p2 = mid(B);
+    return dist2(p1, p2) > 1e-9 ? { p1, p2 } : null;
+  }
+
+  /** Thin dimension line with perpendicular end ticks (classic witness). */
+  _drawDimGhost(p1, p2, opacity = 0.55) {
+    const def = this._def;
+    this._entityGroup.add(this._makeLine([def.toThree(...p1), def.toThree(...p2)], GLYPH_DIM, opacity));
+    const u = sub2(p2, p1), L = len2(u);
+    if (L > 1e-9) {
+      const t = this._pixelWorld(5);
+      const n = [-u[1] / L * t, u[0] / L * t];
+      for (const p of [p1, p2]) {
+        this._entityGroup.add(this._makeLine(
+          [def.toThree(...sub2(p, n)), def.toThree(...add2(p, n))], GLYPH_DIM, opacity));
+      }
+    }
   }
 
   /** Midpoint + outward offset direction for placing an entity's glyphs. */
@@ -2984,12 +3100,18 @@ class SketchMode {
         if (con.type === 'dist') {
           const A = this._ent(con.aId), B = this._ent(con.bId);
           if (A && B) {
-            const mA = this._entGlyphPos(A).base, mB = this._entGlyphPos(B).base;
-            targets.push({ key: 'c' + con.id, base: lerp2(mA, mB, 0.5), dir: [0, 0] });
+            const wit = this._distWitness(A, B, con.mode);
+            if (wit) {
+              this._drawDimGhost(wit.p1, wit.p2);
+              targets.push({ key: 'c' + con.id, base: lerp2(wit.p1, wit.p2, 0.5), dir: [0, 0] });
+            }
           }
         } else {
           const ent = this._ent(con.entId);
-          if (ent) { const g = this._entGlyphPos(ent); targets.push({ key: 'e' + ent.id, ...g }); }
+          if (ent) {
+            const g = this._entGlyphPos(ent);
+            targets.push({ key: 'e' + ent.id, ...g, ghost: con.type, ghostEnt: ent });
+          }
         }
       } else if (con.entId !== undefined) {
         const ent = this._ent(con.entId);
@@ -3007,6 +3129,17 @@ class SketchMode {
         : isDim ? GLYPH_DIM : GLYPH_REL;
       for (const t of targets) {
         const pos = place(t.key, t.base, t.dir);
+        if (t.ghost === 'radius') {
+          // Leader from the center out through the rim to the label
+          this._entityGroup.add(this._makeLine(
+            [def.toThree(...t.ghostEnt.c), def.toThree(...pos)], GLYPH_DIM, 0.45));
+        } else if (t.ghost === 'length') {
+          // Offset dimension line + extension lines from the endpoints
+          const e = t.ghostEnt, ov = sub2(pos, t.base);
+          this._drawDimGhost(add2(e.a, ov), add2(e.b, ov), 0.45);
+          this._entityGroup.add(this._makeLine([def.toThree(...e.a), def.toThree(...add2(e.a, ov))], GLYPH_DIM, 0.25));
+          this._entityGroup.add(this._makeLine([def.toThree(...e.b), def.toThree(...add2(e.b, ov))], GLYPH_DIM, 0.25));
+        }
         const spr = this._textSprite(label, color);
         spr.scale.set(glyphSize * spr.userData.aspect, glyphSize, 1);
         spr.position.copy(def.toThree(pos[0], pos[1]));
@@ -3017,6 +3150,15 @@ class SketchMode {
           conId: con.id,
         });
       }
+    }
+
+    // Live ghost while a two-element dimension is being typed (uncommitted —
+    // once applied, the dist constraint above draws its own witness)
+    if (this._dim && this._dim.bId !== null && this._dim.info && this._dim.info.kind === 'distance'
+        && !this._findConstraint({ type: 'dist', aId: this._dim.aId, bId: this._dim.bId })) {
+      const A = this._ent(this._dim.aId), B = this._ent(this._dim.bId);
+      const wit = A && B ? this._distWitness(A, B, this._dim.info.mode) : null;
+      if (wit) { this._drawDimGhost(wit.p1, wit.p2); }
     }
 
     this._env.viewDirty = true;
