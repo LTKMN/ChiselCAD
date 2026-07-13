@@ -69,7 +69,7 @@ const TOOLS = [
   { id: 'rect',   icon: '▭', label: 'Rect',   hint: 'Click two opposite corners' },
   { id: 'circle', icon: '◯', label: 'Circle', hint: 'Click the center, then a point on the circle' },
   { id: 'trim',   icon: '✂', label: 'Trim',   hint: 'Click the piece of an element to remove (cut at intersections)' },
-  { id: 'dim',    icon: '↔', label: 'Dimension', hint: 'Click an element, then optionally a second — including dashed model edges • type a value, or a name to create a variable' },
+  { id: 'dim',    icon: '↔', label: 'Dimension', hint: 'Click an element, then optionally a second — including dashed model edges • type a value, or a name to create a variable • Tab: measure circles at centers / gap / span' },
 ];
 
 // Relations the user can apply to the current selection. Keys work in the
@@ -91,6 +91,14 @@ const GLYPHS = {
   anchor: '⚓', horizontal: 'H', vertical: 'V', parallel: '∥',
   perp: '⊥', equal: '=', concentric: '◎', tangent: '⌒',
 };
+
+// Distance dims that touch a circle/arc can measure between centers, nearest
+// edges (gap), or farthest edges (span) — cycled in the dim box via Tab/click
+const DIM_AT = [
+  { id: 'center', label: '⊙ center', title: 'Measuring between centers' },
+  { id: 'min',    label: '◦ gap',    title: 'Measuring the gap between nearest edges (tangent points)' },
+  { id: 'max',    label: '◎ span',   title: 'Measuring between farthest edges' },
+];
 
 // Sketch palette — mutable so a Blender theme import can restyle it
 // (colors are read at draw/creation time; applies from the next repaint on)
@@ -1779,6 +1787,16 @@ class SketchMode {
     return c ? c.value : null;
   }
 
+  /** Value-space offset for a tangent-anchored distance dim: the measured
+   *  value = center distance + this ('min' → −(rA+rB), 'max' → +(rA+rB);
+   *  lines contribute no radius). */
+  _distAtOffset(aId, bId, at) {
+    const k = at === 'min' ? -1 : at === 'max' ? 1 : 0;
+    if (!k) { return 0; }
+    const r = (e) => e && e.type !== 'line' ? (e.r || 0) : 0;
+    return k * (r(this._ent(aId)) + r(this._ent(bId)));
+  }
+
   /** Current distance + measuring direction between two entities (pair dim).
    *  mode is decided ONCE when the dimension is created ('perp' for parallel
    *  lines, else 'center') and stays fixed — re-deciding it mid-solve from
@@ -1931,7 +1949,9 @@ class SketchMode {
         if (!A || !B) { return; }
         const g = this._pairDistGeom(A, B, c.mode);
         if (!g) { return; }
-        const err = g.d - c.value;
+        // Tangent-anchored dims: hit the value at the edges, so the target
+        // center distance shifts by the (current) radii
+        const err = g.d - (c.value - this._distAtOffset(c.aId, c.bId, c.at));
         const ptsA = this._entPts(A).filter(p => w(p));
         const ptsB = this._entPts(B).filter(p => w(p));
         const mA = ptsA.length ? 1 : 0, mB = ptsB.length ? 1 : 0;
@@ -1991,7 +2011,7 @@ class SketchMode {
       case 'dist': {
         if (!A || !B) { return 0; }
         const g = this._pairDistGeom(A, B, c.mode);
-        return g ? Math.abs(g.d - c.value) : 0;
+        return g ? Math.abs(g.d - (c.value - this._distAtOffset(c.aId, c.bId, c.at))) : 0;
       }
     }
     return 0;
@@ -2012,7 +2032,7 @@ class SketchMode {
     if (c.type === 'dist') {
       const A = this._ent(c.aId), B = this._ent(c.bId);
       const g = (A && B) ? this._pairDistGeom(A, B, c.mode) : null;
-      return g ? g.d : null;
+      return g ? g.d + this._distAtOffset(c.aId, c.bId, c.at) : null;
     }
     return null;
   }
@@ -2709,10 +2729,15 @@ class SketchMode {
       this._dim.bId = hit.ent.id;
       const info = this._dimInfo(this._dim.aId, this._dim.bId);
       if (info) {
+        // An existing dim between the pair carries its tangent mode over
+        const prior = this._findConstraint({ type: 'dist', aId: this._dim.aId, bId: this._dim.bId });
+        this._dim.at = (prior && prior.at) || 'center';
+        info.at = this._dim.at;
         this._dim.info = info;
         this._dim.kindEl.textContent = '↔';
         this._dim.kindEl.title = 'distance between the two elements';
-        this._dim.input.value = fmt(info.value);
+        this._syncDimAtUI();
+        this._dim.input.value = fmt(info.value + this._distAtOffset(this._dim.aId, this._dim.bId, this._dim.at));
         this._dim.input.focus();
         this._dim.input.select();
         this._renderEntities();
@@ -2758,6 +2783,7 @@ class SketchMode {
       con = this.constraints.find(k => k.type === type && k.entId === aId);
     } else {
       con = this._findConstraint({ type: 'dist', aId, bId });
+      if (con && con.at) { info.at = con.at; }
     }
     const prefill = con && con.varName ? con.varName + '=' + fmt(con.value) : undefined;
     const anchor = (e) => e.type === 'line' ? lerp2(e.a, e.b, 0.5) : e.c;
@@ -2790,10 +2816,12 @@ class SketchMode {
         return { kind: 'distance', value: Math.abs(d), dir: d >= 0 ? nUnit : scale2(nUnit, -1), aId, bId, mode: 'perp' };
       }
     }
-    // Line + circle/arc → perpendicular distance from the center to the line
+    // Line + circle/arc → ALWAYS the perpendicular distance from the center
+    // to the line (never falls back to a center-to-midpoint measure)
     if ((A.type === 'line') !== (B.type === 'line')) {
       const g = this._pairDistGeom(A, B, 'perp');
-      if (g) { return { kind: 'distance', value: g.d, dir: g.dir, aId, bId, mode: 'perp' }; }
+      if (!g) { return null; } // degenerate (zero-length) line
+      return { kind: 'distance', value: g.d, dir: g.dir, aId, bId, mode: 'perp' };
     }
     const delta = sub2(anchor(B), anchor(A));
     const d = len2(delta);
@@ -2816,6 +2844,7 @@ class SketchMode {
     } else {
       c = this._findConstraint({ type: 'dist', aId: info.aId, bId: info.bId })
         || this._addConstraint({ type: 'dist', aId: info.aId, bId: info.bId, value: newValue, mode: info.mode || 'center' });
+      if (c) { c.at = info.at || 'center'; }
       if (varName) {
         console.log('Sketch: variable "' + varName + '" was created, but distance dimensions emit literal coordinates for now.');
       }
@@ -2836,6 +2865,7 @@ class SketchMode {
     const bId = con.bId !== undefined ? con.bId : null;
     const info = this._dimInfo(aId, bId);
     if (!info) { return; }
+    if (con.at) { info.at = con.at; }
     const prefill = con.varName ? con.varName + '=' + fmt(con.value) : fmt(con.value);
     this._openDimBox(e, aId, info, prefill);
   }
@@ -2856,18 +2886,35 @@ class SketchMode {
     kind.title = info.kind === 'radius' ? 'radius' : (info.kind === 'length' ? 'length' : 'distance between the two elements');
     box.appendChild(kind);
 
+    // Tangent-mode chip — shown for distance dims touching a circle/arc
+    const modeBtn = document.createElement('button');
+    modeBtn.type = 'button';
+    modeBtn.className = 'cs-dim-mode';
+    modeBtn.tabIndex = -1;
+    modeBtn.style.display = 'none';
+    modeBtn.addEventListener('mousedown', (ev) => { ev.preventDefault(); ev.stopPropagation(); });
+    modeBtn.addEventListener('click', (ev) => { ev.stopPropagation(); this._cycleDimAt(); });
+    box.appendChild(modeBtn);
+
+    info.at = info.at || 'center';
     const input = document.createElement('input');
     input.type = 'text';
-    input.value = prefill !== undefined ? prefill : fmt(info.value);
+    input.value = prefill !== undefined ? prefill
+      : fmt(info.value + this._distAtOffset(aId, info.bId, info.at));
     input.title = 'Enter a value, a name (creates a variable), or name=value';
     box.appendChild(input);
     panel.appendChild(box);
 
-    this._dim = { aId, bId: info.bId !== undefined ? info.bId : null, box, input, info, kindEl: kind };
+    this._dim = {
+      aId, bId: info.bId !== undefined ? info.bId : null,
+      box, input, info, kindEl: kind, modeBtn, at: info.at,
+    };
+    this._syncDimAtUI();
 
     input.addEventListener('keydown', (ev) => {
       ev.stopPropagation();
       if (ev.key === 'Escape') { this._closeDimBox(); this._renderEntities(); }
+      if (ev.key === 'Tab') { ev.preventDefault(); this._cycleDimAt(); return; }
       if (ev.key !== 'Enter') { return; }
       const dim = this._dim;
       if (!dim) { return; }
@@ -2877,7 +2924,8 @@ class SketchMode {
       if (m) { value = parseFloat(m[1]); }
       else if ((m = text.match(/^([A-Za-z_$][\w$]*)\s*(?:=\s*(-?\d*\.?\d+))?$/))) {
         varName = m[1];
-        value = m[2] !== undefined ? parseFloat(m[2]) : dim.info.value;
+        value = m[2] !== undefined ? parseFloat(m[2])
+          : dim.info.value + this._distAtOffset(dim.aId, dim.bId, dim.at);
       }
       if (value === null || !isFinite(value) || value <= 0) {
         input.classList.add('cs-dim-bad');
@@ -2896,6 +2944,39 @@ class SketchMode {
       this._dim.box.parentNode.removeChild(this._dim.box);
     }
     this._dim = null;
+  }
+
+  /** Tangent modes apply when a distance dim touches at least one circle/arc. */
+  _dimAtApplicable() {
+    const d = this._dim;
+    if (!d || d.bId === null || !d.info || d.info.kind !== 'distance') { return false; }
+    const A = this._ent(d.aId), B = this._ent(d.bId);
+    return !!(A && B && (A.type !== 'line' || B.type !== 'line'));
+  }
+
+  _syncDimAtUI() {
+    const d = this._dim;
+    if (!d || !d.modeBtn) { return; }
+    if (!this._dimAtApplicable()) { d.modeBtn.style.display = 'none'; return; }
+    const m = DIM_AT.find(m => m.id === (d.at || 'center')) || DIM_AT[0];
+    d.modeBtn.style.display = '';
+    d.modeBtn.textContent = m.label;
+    d.modeBtn.title = m.title + ' — click or Tab to switch';
+  }
+
+  /** Cycle center → gap → span; the input and witness ghost follow live. */
+  _cycleDimAt() {
+    const d = this._dim;
+    if (!d || !this._dimAtApplicable()) { return; }
+    const i = DIM_AT.findIndex(m => m.id === (d.at || 'center'));
+    d.at = DIM_AT[(i + 1) % DIM_AT.length].id;
+    d.info.at = d.at;
+    d.input.value = fmt(d.info.value + this._distAtOffset(d.aId, d.bId, d.at));
+    d.input.classList.remove('cs-dim-bad');
+    this._syncDimAtUI();
+    this._renderEntities();
+    d.input.focus();
+    d.input.select();
   }
 
   // =====================================================================
@@ -2986,33 +3067,47 @@ class SketchMode {
   }
 
   /** Witness endpoints (p1 → p2) for a distance dimension — the two points
-   *  the measure actually runs between, matching _pairDistGeom's modes. */
-  _distWitness(A, B, mode) {
+   *  the measure actually runs between, matching _pairDistGeom's modes.
+   *  ext: when the perpendicular foot lands beyond the measured segment,
+   *  a dashed extension from the nearest endpoint out to the foot. */
+  _distWitness(A, B, mode, at) {
     const mid = (e) => e.type === 'line' ? lerp2(e.a, e.b, 0.5) : e.c;
     const foot = (p, ln) => {
       const u = sub2(ln.b, ln.a), L2 = dot2(u, u);
       if (L2 < 1e-12) { return null; }
       const t = dot2(sub2(p, ln.a), u) / L2;
-      return [ln.a[0] + u[0] * t, ln.a[1] + u[1] * t];
+      return { pt: [ln.a[0] + u[0] * t, ln.a[1] + u[1] * t], t };
+    };
+    const extFor = (f, ln) =>
+      f.t < 0 ? [ln.a, f.pt] : (f.t > 1 ? [ln.b, f.pt] : null);
+    // Tangent-anchored dims measure from the circle's edge, not its center:
+    // 'min' slides the endpoint toward the other element, 'max' away from it
+    const k = at === 'min' ? -1 : at === 'max' ? 1 : 0;
+    const edge = (p, toward, ent) => {
+      if (!k || !ent || ent.type === 'line') { return p; }
+      const u = sub2(toward, p), L = len2(u);
+      if (L < 1e-9) { return p; }
+      return add2(p, scale2(u, -k * ent.r / L));
     };
     if (mode === 'perp') {
       if (A.type === 'line' && B.type === 'line') {
-        const p1 = mid(A), p2 = foot(p1, B);
-        return p2 ? { p1, p2 } : null;
+        const p1 = mid(A), f = foot(p1, B);
+        return f ? { p1, p2: f.pt, ext: extFor(f, B) } : null;
       }
       const ln = A.type === 'line' ? A : (B.type === 'line' ? B : null);
       const ci = A.type !== 'line' ? A : (B.type !== 'line' ? B : null);
       if (ln && ci) {
-        const p2 = foot(ci.c, ln);
-        return p2 ? { p1: ci.c, p2 } : null;
+        const f = foot(ci.c, ln);
+        return f ? { p1: edge(ci.c, f.pt, ci), p2: f.pt, ext: extFor(f, ln) } : null;
       }
     }
     const p1 = mid(A), p2 = mid(B);
-    return dist2(p1, p2) > 1e-9 ? { p1, p2 } : null;
+    if (dist2(p1, p2) <= 1e-9) { return null; }
+    return { p1: edge(p1, p2, A), p2: edge(p2, p1, B) };
   }
 
   /** Thin dimension line with perpendicular end ticks (classic witness). */
-  _drawDimGhost(p1, p2, opacity = 0.55) {
+  _drawDimGhost(p1, p2, opacity = 0.55, ext) {
     const def = this._def;
     this._entityGroup.add(this._makeLine([def.toThree(...p1), def.toThree(...p2)], GLYPH_DIM, opacity));
     const u = sub2(p2, p1), L = len2(u);
@@ -3023,6 +3118,10 @@ class SketchMode {
         this._entityGroup.add(this._makeLine(
           [def.toThree(...sub2(p, n)), def.toThree(...add2(p, n))], GLYPH_DIM, opacity));
       }
+    }
+    if (ext && dist2(ext[0], ext[1]) > 1e-9) {
+      this._entityGroup.add(this._makeDashedLine(
+        [def.toThree(...ext[0]), def.toThree(...ext[1])], GLYPH_DIM, opacity * 0.7));
     }
   }
 
@@ -3100,9 +3199,9 @@ class SketchMode {
         if (con.type === 'dist') {
           const A = this._ent(con.aId), B = this._ent(con.bId);
           if (A && B) {
-            const wit = this._distWitness(A, B, con.mode);
+            const wit = this._distWitness(A, B, con.mode, con.at);
             if (wit) {
-              this._drawDimGhost(wit.p1, wit.p2);
+              this._drawDimGhost(wit.p1, wit.p2, 0.55, wit.ext);
               targets.push({ key: 'c' + con.id, base: lerp2(wit.p1, wit.p2, 0.5), dir: [0, 0] });
             }
           }
@@ -3157,8 +3256,8 @@ class SketchMode {
     if (this._dim && this._dim.bId !== null && this._dim.info && this._dim.info.kind === 'distance'
         && !this._findConstraint({ type: 'dist', aId: this._dim.aId, bId: this._dim.bId })) {
       const A = this._ent(this._dim.aId), B = this._ent(this._dim.bId);
-      const wit = A && B ? this._distWitness(A, B, this._dim.info.mode) : null;
-      if (wit) { this._drawDimGhost(wit.p1, wit.p2); }
+      const wit = A && B ? this._distWitness(A, B, this._dim.info.mode, this._dim.at) : null;
+      if (wit) { this._drawDimGhost(wit.p1, wit.p2, 0.55, wit.ext); }
     }
 
     this._env.viewDirty = true;

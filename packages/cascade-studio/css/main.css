@@ -1040,6 +1040,22 @@ body {
   font-size: 11px;
   padding: 0 5px;
 }
+.cs-dim-box .cs-dim-mode {
+  background: var(--cs-bg-primary);
+  color: var(--cs-text-muted);
+  border: 1px solid var(--cs-border);
+  border-radius: 2px;
+  font-family: var(--cs-font-mono);
+  font-size: 11px;
+  padding: 2px 6px;
+  margin-right: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.cs-dim-box .cs-dim-mode:hover {
+  color: var(--cs-text-primary);
+  border-color: var(--cs-accent);
+}
 .cs-dim-box input {
   background: var(--cs-bg-primary);
   color: var(--cs-text-primary);
