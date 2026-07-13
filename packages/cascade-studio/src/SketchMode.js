@@ -168,6 +168,17 @@ function fmt(n) {
   return String(v);
 }
 
+/** Evaluate simple arithmetic typed into a dim box ("25/2", "3*(8+1.5)").
+ *  Digits and + - * / ( ) only — no identifiers can be formed, so Function
+ *  is safe. Returns a finite number or null. */
+function evalDimMath(text) {
+  if (!/^[\d+\-*/().\s]+$/.test(text) || !/\d/.test(text)) { return null; }
+  try {
+    const v = Function('"use strict"; return (' + text + ');')();
+    return typeof v === 'number' && isFinite(v) ? v : null;
+  } catch { return null; }
+}
+
 /** Intersection of segment a-b with segment c-d → t on a-b, or null. */
 function segSegT(a, b, c, d) {
   const r = sub2(b, a), s = sub2(d, c);
@@ -2404,6 +2415,9 @@ class SketchMode {
         break;
       }
       case 'dim': {
+        // Keep the dim box's input focused: the default mousedown action
+        // would hand focus to the panel container after our handler runs
+        e.preventDefault();
         this._onDimClick(e, raw);
         break;
       }
@@ -2738,8 +2752,11 @@ class SketchMode {
         this._dim.kindEl.title = 'distance between the two elements';
         this._syncDimAtUI();
         this._dim.input.value = fmt(info.value + this._distAtOffset(this._dim.aId, this._dim.bId, this._dim.at));
-        this._dim.input.focus();
-        this._dim.input.select();
+        // Deferred: focusing synchronously inside mousedown gets undone by
+        // the event's default focus change
+        setTimeout(() => {
+          if (this._dim) { this._dim.input.focus(); this._dim.input.select(); }
+        }, 0);
         this._renderEntities();
       }
       return;
@@ -2901,7 +2918,7 @@ class SketchMode {
     input.type = 'text';
     input.value = prefill !== undefined ? prefill
       : fmt(info.value + this._distAtOffset(aId, info.bId, info.at));
-    input.title = 'Enter a value, a name (creates a variable), or name=value';
+    input.title = 'Enter a value or expression (25/2), a name (creates a variable), or name=value';
     box.appendChild(input);
     panel.appendChild(box);
 
@@ -2920,12 +2937,14 @@ class SketchMode {
       if (!dim) { return; }
       const text = input.value.trim();
       let value = null, varName = null;
-      let m = text.match(/^(-?\d*\.?\d+)$/);
-      if (m) { value = parseFloat(m[1]); }
-      else if ((m = text.match(/^([A-Za-z_$][\w$]*)\s*(?:=\s*(-?\d*\.?\d+))?$/))) {
+      const m = text.match(/^([A-Za-z_$][\w$]*)\s*(?:=\s*(.+))?$/);
+      if (m) {
+        // A name creates a variable; "name=expr" also sets its value
         varName = m[1];
-        value = m[2] !== undefined ? parseFloat(m[2])
+        value = m[2] !== undefined ? evalDimMath(m[2])
           : dim.info.value + this._distAtOffset(dim.aId, dim.bId, dim.at);
+      } else {
+        value = evalDimMath(text); // plain number or expression (25/2)
       }
       if (value === null || !isFinite(value) || value <= 0) {
         input.classList.add('cs-dim-bad');
